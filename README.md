@@ -1,15 +1,19 @@
 # Gridiron Drive
 
-A 3D mobile-friendly American football arcade game you can play in the browser.
+A 3D mobile-friendly American football game you can play in the browser.
 
 **Play:** https://anubassis.github.io/gridiron-drive/
 
 ## How to play
 
-Pick a team from the Pacific or Central conference, then try to cross the Quota line each play.
+Pick Arcade Quota or Downs Drive, then choose a team from the Pacific or Central conference.
 
-- **Phone:** hold the joystick to aim (the cyan line snaps to a receiver) and release to throw. A **RUN** button lets the quarterback scramble. After a catch, the stick steers the runner — up is downfield, left and right match the screen.
-- **Computer:** use WASD or the arrow keys to aim, Space or click to throw, and **R** to scramble.
+- **Arcade:** cross the Quota line each play to keep the drive going.
+- **Downs:** 4 downs to gain 10 yards, first-down markers, and a two-minute clock.
+
+**Phone:** call a play, hold the joystick to aim (the cyan line snaps to a receiver), and release to throw. **RUN** scrambles the quarterback; **STIFF** can break one tackle. After a catch, the stick steers the runner — up is downfield, left and right match the screen. Flick left or right when the juke slider appears to dodge a defender.
+
+**Computer:** WASD or arrows to aim or steer, Space to throw, R to scramble.
 
 Add the game to your home screen for a standalone app icon.
 

@@ -44,6 +44,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   <script>
 
 
+
 (() => {
   "use strict";
 
@@ -120,11 +121,71 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     catchSpotY: 0,
     pausedFrom: "live",
     celebration: null,
+    gameMode: "quota", // quota | downs
+    down: 1,
+    distance: 10,
+    clock: 120,
+    scrambling: false,
+    stiffArm: 0,
+    stiffUsed: false,
+    hitStop: 0,
+    timeScale: 1,
+    slowMo: 0,
+    tumble: 0,
+    coverScheme: "man",
+    playId: "go",
+    settings: null,
+    stats: { yards: 0, tds: 0, comp: 0, att: 0, ints: 0, sacks: 0 },
+    fpsEma: 60,
+    adaptT: 0,
+    dprTarget: 1,
+    autoSnap: false,
   };
 
   try {
     state.best = parseInt(localStorage.getItem("gridironDriveBest") || "0", 10) || 0;
   } catch (e) { state.best = 0; }
+  function defaultSettings() {
+    return { sound: true, vibrate: true, difficulty: "normal", camera: "standard", night: false };
+  }
+  function loadSettings() {
+    try {
+      const s = JSON.parse(localStorage.getItem("gridironDriveSettings") || "null");
+      return Object.assign(defaultSettings(), s || {});
+    } catch (e) { return defaultSettings(); }
+  }
+  function saveSettings() {
+    try { localStorage.setItem("gridironDriveSettings", JSON.stringify(state.settings)); } catch (e) {}
+  }
+  state.settings = loadSettings();
+  state.muted = !state.settings.sound;
+  const DIFF_MUL = { easy: 0.86, normal: 1, hard: 1.16 };
+  const TACKLE_R = 1.08;
+
+  function haptic(pattern) {
+    if (!state.settings || !state.settings.vibrate) return;
+    try { if (navigator.vibrate) navigator.vibrate(pattern); } catch (e) {}
+  }
+  function resetStats() {
+    state.stats = { yards: 0, tds: 0, comp: 0, att: 0, ints: 0, sacks: 0 };
+  }
+  function completionPct() {
+    const a = state.stats.att || 0;
+    if (!a) return 0;
+    return Math.round((state.stats.comp / a) * 100);
+  }
+
+  const PLAYBOOK = [
+    { id: "slants", name: "Slants", sub: "Quick inside",
+      routes: { WRX: [[3, 5], [10, 9]], WRZ: [[-3, 5], [-10, 9]], WR3: [[4, 5], [9, 8]], TE: [[0, 5], [8, 7]], RB: [[8, 1], [14, 3]] } },
+    { id: "go", name: "Go Routes", sub: "Four verts",
+      routes: { WRX: [[0, 10], [0, 24], [0, 38]], WRZ: [[0, 10], [0, 24], [0, 36]], WR3: [[0, 8], [4, 20], [6, 32]], TE: [[0, 10], [1, 22]], RB: [[-6, 2], [-10, 6]] } },
+    { id: "post", name: "Post", sub: "Deep cross",
+      routes: { WRX: [[0, 12], [8, 24]], WRZ: [[0, 10], [-6, 22]], WR3: [[0, 8], [0, 14], [10, 16]], TE: [[2, 8], [8, 14]], RB: [[8, 2], [12, 4]] } },
+    { id: "curl", name: "Curl / Flat", sub: "Sit & throw",
+      routes: { WRX: [[0, 12], [1, 11]], WRZ: [[0, 12], [-1, 11]], WR3: [[0, 8], [7, 8]], TE: [[0, 6], [8, 6]], RB: [[10, 1], [14, 2]] } },
+  ];
+  function playById(id) { return PLAYBOOK.find((p) => p.id === id) || PLAYBOOK[1]; }
 
   const input = {
     keys: Object.create(null),
@@ -240,9 +301,25 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         setTimeout(() => beep(523, 0.16, "square", 0.06), 140);
         setTimeout(() => beep(659, 0.28, "square", 0.07), 280);
         break;
-      case "tackle": noiseBurst(0.2, 0.2, 500); beep(90, 0.14, "sawtooth", 0.05); break;
+      case "tackle":
+        noiseBurst(0.22, 0.28, 420);
+        beep(90, 0.16, "sawtooth", 0.07);
+        beep(60, 0.12, "triangle", 0.05);
+        break;
+      case "catch":
+        noiseBurst(0.08, 0.12, 1400);
+        beep(660, 0.07, "sine", 0.05);
+        beep(990, 0.09, "triangle", 0.04);
+        break;
+      case "td":
+        beep(392, 0.18, "square", 0.07);
+        setTimeout(() => beep(523, 0.18, "square", 0.07), 150);
+        setTimeout(() => beep(784, 0.28, "sawtooth", 0.08), 300);
+        noiseBurst(0.4, 0.12, 800);
+        break;
       case "incomplete": beep(200, 0.25, "triangle", 0.05, 120); break;
       case "juke": beep(880, 0.08, "square", 0.06); beep(1320, 0.1, "sine", 0.05); break;
+      case "click": beep(740, 0.05, "square", 0.04); break;
     }
   }
 
@@ -390,7 +467,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       x, y, vx: 0, vy: 0,
       facing: teamKey === "home" ? Math.PI / 2 : -Math.PI / 2,
       speed, baseSpeed: speed,
-      radius: 0.85,
+      radius: 0.55,
       hasBall: false,
       route: [], routeI: 0,
       snapX: x, snapY: y,
@@ -432,7 +509,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
   function difficulty() {
     const hard = (state.team && state.team.hard) || (state.foe && state.foe.hard);
-    return hard ? 1.18 : 1;
+    const mul = DIFF_MUL[(state.settings && state.settings.difficulty) || "normal"] || 1;
+    return mul * (hard ? 1.12 : 1);
   }
 
   function buildPlay() {
@@ -473,16 +551,26 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     const pairs = [[lt, de1], [lg, dt1], [oc, nt], [rg, dt2], [rt, de2]];
     for (const [l, r] of pairs) { l.blockTarget = r; r.blocker = l; r.rush = true; }
 
-    const rel = (p, pts) => { p.route = pts.map(([dx, dy]) => ({ x: p.x + dx, y: p.y + dy })); };
-    // mixed routes so there's always a nearby target
-    rel(wrx, [[0, 8], [8, 16], [10, 26]]);
-    rel(wrz, [[0, 10], [0, 24], [0, 34]]);
-    rel(slot, [[0, 6], [10, 12], [14, 18]]);
-    rel(te, [[0, 8], [1, 9]]);
-    rel(rb, [[8, 1], [16, 5]]);
-    lb1.zone = { x: bx - 5, y: los + 9 };
+    state._recv = { WRX: wrx, WRZ: wrz, WR3: slot, TE: te, RB: rb, QB: qb };
+    applyPlayRoutes(playById(state.playId || "go"));
+    // coverage: man or zone
+    const scheme = Math.random() < 0.55 ? "man" : "zone";
+    state.coverScheme = scheme;
+    cbx.cover = wrx; cbz.cover = wrz;
+    lb1.zone = { x: bx - 6, y: los + 9 };
     lb2.zone = { x: bx + 6, y: los + 10 };
-    sfty.zone = { x: bx + 2, y: los + 18 };
+    sfty.zone = { x: bx + 1, y: los + 16 };
+    if (scheme === "zone") {
+      cbx.cover = null; cbz.cover = null;
+      cbx.zone = { x: wrx.x, y: los + 8 };
+      cbz.zone = { x: wrz.x, y: los + 8 };
+      sfty.zone = { x: bx, y: los + 18 };
+      slot && (lb1.zone = { x: bx - 8, y: los + 11 });
+    } else {
+      // man: LB shadows the slot, safety help over the top
+      lb1.cover = slot;
+      sfty.cover = null;
+    }
 
     qb.hasBall = true;
     qb.animState = "hold";
@@ -494,6 +582,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     state.aiming = false;
     state.aimCommit = 0;
     state.scrambling = false;
+    state.stiffArm = 0;
+    state.stiffUsed = false;
     state.aimAngle = Math.PI / 2;
     state.yardsThisPlay = 0;
     state.quotaMet = false;
@@ -523,35 +613,91 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
 
   function startRun() {
-    state.mode = "live";
     state.score = 0;
     state.displayScore = 0;
     state.playIndex = 0;
-    state.quota = 10;
-    state.los = 32;
+    resetStats();
+    if (state.gameMode === "downs") {
+      state.los = 25;
+      state.down = 1;
+      state.distance = 10;
+      state.firstDownY = 35;
+      state.clock = 120;
+    } else {
+      state.quota = 10;
+      state.los = 32;
+      state.firstDownY = 42;
+    }
     state.ballX = FIELD_W * 0.5;
     state.tutorial = !state.seenTutorial;
     state.tutorialT = 0;
     setViewBlur(false);
+    refreshFieldArt();
+    applyLighting();
     setupPlay();
   }
 
   function nextPlay() {
+    if (state.gameMode === "downs") {
+      // new drive after a TD
+      state.los = 25;
+      state.down = 1;
+      state.distance = 10;
+      state.firstDownY = 35;
+      state.ballX = FIELD_W * 0.5 + rand(-3, 3);
+      setupPlay();
+      return;
+    }
     state.playIndex++;
     state.quota = 10 + state.playIndex * 5;
     state.los = clamp(32 + Math.min(20, state.playIndex * 2), 25, 70);
     state.ballX = FIELD_W * 0.5 + rand(-4, 4);
     setupPlay();
+  }
+
+  function applyPlayRoutes(play) {
+    if (!play || !state._recv) return;
+    state.playId = play.id;
+    const rel = (p, pts) => {
+      if (!p) return;
+      p.routeI = 0;
+      p.route = (pts || []).map(([dx, dy]) => ({ x: p.x + dx, y: p.y + dy }));
+    };
+    const r = play.routes || {};
+    rel(state._recv.WRX, r.WRX);
+    rel(state._recv.WRZ, r.WRZ);
+    rel(state._recv.WR3, r.WR3);
+    rel(state._recv.TE, r.TE);
+    rel(state._recv.RB, r.RB);
+  }
+
+  function pickPlay(id) {
+    const play = typeof id === "string" ? playById(id) : (id || playById(state.playId));
+    applyPlayRoutes(play);
     state.mode = "live";
+    state.phase = "pass";
+    state.playTime = 0;
+    state.aiming = false;
+    state.scrambling = false;
+    sfx("whistle");
+    haptic(12);
+    setMsg("", 0);
   }
 
   function setupPlay() {
     const remain = AWAY_GL - state.los;
-    if (state.quota > remain) state.quota = Math.max(5, Math.round(remain));
-    state.firstDownY = Math.min(AWAY_GL, state.los + state.quota);
+    if (state.gameMode === "quota") {
+      if (state.quota > remain) state.quota = Math.max(5, Math.round(remain));
+      state.firstDownY = Math.min(AWAY_GL, state.los + state.quota);
+    } else {
+      state.distance = Math.max(1, Math.round((state.firstDownY - state.los) * 10) / 10);
+      if (state.firstDownY > AWAY_GL) state.firstDownY = AWAY_GL;
+    }
     buildPlay();
-    state.phase = "pass";
+    state.phase = "pre";
     setMsg("", 0);
+    if (state.autoSnap) pickPlay(state.playId || "go");
+    else state.mode = "playcall";
   }
 
   function setViewBlur(on) {
@@ -675,9 +821,12 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     state.ball.vz = 6 + Math.min(8, distYd * 0.18);
     state.phase = "flight";
     state.aiming = false;
+    state.scrambling = false;
     state.tutorial = false;
     state.seenTutorial = true;
+    state.stats.att++;
     sfx("whoosh");
+    haptic(8);
   }
 
   function giveBall(p) {
@@ -705,74 +854,158 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     }
     if (!best) return;
     if (best.team === "home" && (best.role === "WR" || best.role === "TE" || best.role === "RB" || best.role === "QB")) {
+      let defNear = null, defD = 99;
+      for (const d of defense()) {
+        if (d.down) continue;
+        const dd = dist(d.x, d.y, b.x, b.y);
+        if (dd < defD) { defD = dd; defNear = d; }
+      }
+      const tight = defNear && defD < bestD + 0.45 && defD < 1.6;
+      const picked = tight && (defD < bestD - 0.15 || (defD <= bestD + 0.2 && Math.random() < 0.45));
+      if (picked) { interceptBall(defNear); return; }
       giveBall(best);
       state.phase = "run";
       state.catchSpotY = best.y;
       state.yardsThisPlay = Math.max(0, best.y - state.los);
-      sfx("chime");
+      state.stats.comp++;
+      sfx("catch");
+      haptic([10, 30, 20]);
       addBanner("Great!", "", "#ffe027", 1.15);
       spawnParticles(best.x, best.y, "#7CFF5A", 36, 11, 1.0);
       spawnParticles(best.x, best.y, "#ffe027", 16, 8, 0.8);
-      setMsg("Cross the Quota line!", 2.2);
+      setMsg(state.gameMode === "downs" ? "Pick up the first down!" : "Cross the Quota line!", 2.2);
     } else if (best.team === "away") {
-      // tip / incomplete rather than a long INT in quota mode
-      incompletePlay();
+      interceptBall(best);
+    }
+  }
+
+  function interceptBall(d) {
+    if (!d) { incompletePlay(); return; }
+    giveBall(d);
+    d.animState = "catch";
+    d.animT = 0;
+    state.phase = "dead";
+    state.stats.ints++;
+    if (state.ball) { state.ball.state = "held"; }
+    sfx("incomplete");
+    sfx("whistle");
+    haptic([40, 40, 80]);
+    addBanner("Intercepted!", "", "#ff6b4a", 1.6);
+    spawnParticles(d.x, d.y, "#ff6b4a", 28, 9, 0.9);
+    state.result = "int";
+    state.resultT = 0;
+    saveBest();
+    state.mode = "reset";
+    if (state.gameMode === "downs") {
+      /* game over after the reset beat, see update() */
     }
   }
 
   function incompletePlay() {
     if (state.mode !== "live") return;
     state.phase = "dead";
-    state.mode = "reset";
-    state.resultT = 0;
-    state.result = "incomplete";
     if (state.ball) { state.ball.state = "dead"; state.ball.attached = null; }
-    // nearest WR puts hands on helmet
     let wr = state.targetRecv || receivers()[0];
     if (wr) { wr.animState = "helm"; wr.animT = 0; wr.vx = 0; wr.vy = 0; }
     sfx("incomplete");
     sfx("whistle");
+    haptic(20);
+    if (state.gameMode === "downs") {
+      resolveDownsTick(state.los, 0, "incomplete");
+    } else {
+      state.mode = "reset";
+      state.result = "incomplete";
+      state.resultT = 0;
+    }
   }
 
   function finishPlay(kind, spotY, spotX) {
     if (state.mode !== "live") return;
-    const gained = Math.max(0, (spotY == null ? (carrier() ? carrier().y : state.los) : spotY) - state.los);
+    const c = carrier();
+    const spot = spotY == null ? (c ? c.y : state.los) : spotY;
+    const gained = spot - state.los;
     state.yardsThisPlay = gained;
+    state.stats.yards += gained;
     state.phase = "dead";
     if (kind === "td") {
       state.mode = "celebrate";
       state.result = "td";
       state.resultT = 0;
-      const bonus = 1500 + state.quota * 40;
+      state.stats.tds++;
+      const bonus = state.gameMode === "downs" ? 7 : (1500 + state.quota * 40);
       addScore(bonus);
-      const c = carrier();
       if (c) { c.animState = "celebrate"; c.animT = 0; c.vx = 0; c.vy = 0; }
-      addBanner("Touch Down!", "+" + bonus + " pt", "#ffe027", 2.2);
+      addBanner("Touch Down!", state.gameMode === "downs" ? "+7" : ("+" + bonus + " pt"), "#ffe027", 2.2);
+      sfx("td");
       sfx("cheer");
+      haptic([20, 40, 20, 40, 80]);
       spawnParticles(spotX || FIELD_W / 2, AWAY_GL, "#ffe027", 50, 12, 1.2);
       spawnParticles(spotX || FIELD_W / 2, AWAY_GL, "#fff", 24, 9, 1.0);
-      state.shake = 0.8;
+      state.shake = 0.85;
+      state.slowMo = 1.35;
+      state.timeScale = 0.38;
       state.quotaMet = true;
     } else {
-      // tackle
-      sfx("tackle");
+      if (c && !c.down) { c.down = true; c.animState = "down"; }
+      const isSack = c && c.role === "QB" && (state.scrambling || spot <= state.los + 0.4);
+      if (isSack) state.stats.sacks++;
       sfx("whistle");
-      const c = carrier();
-      if (c) { c.down = true; c.animState = "down"; }
-      if (gained + 0.15 >= state.quota || state.quotaMet) {
+      if (state.gameMode === "downs") {
+        resolveDownsTick(spot, gained, isSack ? "sack" : "tackle", spotX);
+      } else if (gained + 0.15 >= (state.quota || 0) || state.quotaMet) {
         state.mode = "reset";
         state.result = "success";
         state.resultT = 0;
-        addBanner("Quota in!", "+" + Math.round(gained) + " yards", "#7CFF5A", 1.4);
+        addBanner("Quota in!", "+" + Math.round(Math.max(0, gained)) + " yards", "#7CFF5A", 1.4);
       } else {
         saveBest();
-        state.mode = "gameover";
+        state.mode = "reset";
         state.result = "fail";
         state.resultT = 0;
-        setViewBlur(true);
-        sfx("whistle");
       }
     }
+  }
+
+  function resolveDownsTick(spot, gained, kind, spotX) {
+    const newLos = clamp(spot, 0.8, AWAY_GL);
+    if (kind !== "incomplete" && newLos >= state.firstDownY - 0.25) {
+      state.los = newLos;
+      state.ballX = clamp(spotX || state.ballX, 8, FIELD_W - 8);
+      state.down = 1;
+      state.distance = Math.min(10, AWAY_GL - state.los);
+      state.firstDownY = Math.min(AWAY_GL, state.los + state.distance);
+      addBanner("First Down!", "+" + Math.max(0, Math.round(gained)) + " yards", "#7CFF5A", 1.4);
+      sfx("chime");
+      state.mode = "reset";
+      state.result = "first";
+      state.resultT = 0;
+      return;
+    }
+    if (kind !== "incomplete") {
+      state.los = newLos;
+      state.ballX = clamp(spotX || state.ballX, 8, FIELD_W - 8);
+    }
+    state.down++;
+    state.distance = Math.max(0.5, state.firstDownY - state.los);
+    if (state.down > 4) {
+      addBanner("Turnover on downs", "", "#ff6b4a", 1.6);
+      saveBest();
+      state.mode = "reset";
+      state.result = "turnover";
+      state.resultT = 0;
+    } else {
+      const label = kind === "incomplete" ? "Incomplete" : (kind === "sack" ? "Sack" : "Tackled");
+      addBanner(label, downLabel(state.down) + " & " + distLabel(), "#ffe027", 1.3);
+      state.mode = "reset";
+      state.result = kind === "incomplete" ? "incomplete" : "down";
+      state.resultT = 0;
+    }
+  }
+
+  function downLabel(d) { return d === 1 ? "1st" : d === 2 ? "2nd" : d === 3 ? "3rd" : "4th"; }
+  function distLabel() {
+    if (state.firstDownY >= AWAY_GL - 0.2) return "Goal";
+    return String(Math.max(1, Math.round(state.distance)));
   }
 
   function addScore(n) {
@@ -818,7 +1051,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       setTimeout(() => { if (state.juke === j) state.juke = null; }, 200);
     } else {
       state.juke = null;
-      if (c) finishPlay("tackle", c.y, c.x);
+      if (c && j.defender) beginTackle(j.defender, c, { gang: false });
+      else if (c) finishPlay("tackle", c.y, c.x);
     }
   }
 
@@ -838,6 +1072,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         let best = null, bestD = 3.2;
         for (const cand of dl) {
           if (cand.down || cand.diving) continue;
+          if ((cand.shedding || 0) > 0) continue;
+          // after the pocket window, don't re-lock a rusher who already shed
+          if (state.playTime > POCKET_SAFE && !cand.engaged) continue;
           if (cand.blocker && cand.blocker !== l && (cand.shedding || 0) <= 0 && cand.engaged) continue;
           const dd = dist(l.x, l.y, cand.x, cand.y);
           if (dd < bestD) { bestD = dd; best = cand; }
@@ -880,15 +1117,17 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
       const blocked = r.blocker && r.engaged && (r.shedding || 0) <= 0 && !r.blocker.down;
       if (blocked && state.playTime > POCKET_SAFE) {
-        const chance = (0.16 * difficulty()) * dt;
-        if (Math.random() < chance) {
-          r.shedding = 1.15;
+        const overdue = state.playTime - POCKET_SAFE;
+        const chance = (0.9 + overdue * 1.4) * dt * difficulty();
+        if (Math.random() < chance || overdue > 0.65) {
+          r.shedding = 1.8;
           r.engaged = false;
+          r.blocker = null;
         }
       }
 
       if ((r.shedding || 0) > 0) {
-        moveToward(r, qb.x, qb.y, r.speed * 1.18);
+        moveToward(r, qb.x, qb.y, r.speed * 1.35);
         r.animState = "run";
         r.facing = Math.atan2(qb.y - r.y, qb.x - r.x);
       } else if (blocked) {
@@ -1013,21 +1252,25 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       }
       if (d.down) { d.vx = 0; d.vy = 0; continue; }
       d.speed = d.baseSpeed;
+      const openField = carr && (state.phase === "run" || (state.phase === "pass" && state.scrambling && state.playTime >= POCKET_SAFE));
+      const crashQB = carr && state.phase === "pass" && state.scrambling && (d.role === "LB" || d.role === "S" || d.role === "DL" || d.rush);
       if (passing) {
-        const tx = ball.x + ball.vx * 0.2, ty = ball.y + ball.vy * 0.2;
+        const tx = ball.x + ball.vx * 0.28, ty = ball.y + ball.vy * 0.28;
         const toBall = dist(d.x, d.y, tx, ty);
-        if (toBall < 10 && ball.z < 5) moveToward(d, tx, ty, d.speed * 0.95);
-        else if (d.cover) moveToward(d, d.cover.x + 0.6, d.cover.y + 1.2, d.speed * 0.92);
-        else if (d.zone) moveToward(d, d.zone.x, d.zone.y, d.speed * 0.7);
-      } else if (carr && state.phase === "run") {
-        const tx = carr.x, ty = carr.y + 1.1;
-        moveToward(d, tx, ty, d.speed * 1.05);
+        if (toBall < 11 && ball.z < 5.5) moveToward(d, tx, ty, d.speed * 1.02);
+        else if (d.cover) moveToward(d, d.cover.x + 0.4, d.cover.y + 0.9, d.speed * 0.96);
+        else if (d.zone) moveToward(d, d.zone.x, d.zone.y, d.speed * 0.75);
+      } else if (openField) {
+        pursueCarrier(d, carr);
       } else if ((d.role === "DL" || d.rush) && state.phase === "pass") {
         /* rushers are handled in updateLineBattle */
+      } else if (crashQB && state.playTime >= POCKET_SAFE * 0.65) {
+        // LBs start to spy / crash once the QB tucks, but pocket clamp still holds until POCKET_SAFE
+        pursueCarrier(d, carr, 0.95);
       } else if (d.cover) {
-        moveToward(d, d.cover.x + 0.7, d.cover.y + 1.4, d.speed * 0.9);
+        moveToward(d, d.cover.x + 0.45, d.cover.y + 1.0, d.speed * 0.94);
       } else if (d.zone) {
-        moveToward(d, d.zone.x, d.zone.y, d.speed * 0.7);
+        moveToward(d, d.zone.x, d.zone.y, d.speed * 0.72);
       }
     }
 
@@ -1049,7 +1292,10 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         const a = state.players[i], b = state.players[j];
         const dx = b.x - a.x, dy = b.y - a.y;
         const d = Math.hypot(dx, dy);
-        const min = a.radius + b.radius - 0.18;
+        // Do not shove the ball carrier away from tacklers — that was why tackles never landed
+        // (old radii kept them 1.5y apart, outside a 1.2y tackle range).
+        if ((a.hasBall && b.team !== a.team) || (b.hasBall && a.team !== b.team)) continue;
+        const min = a.radius + b.radius - 0.08;
         if (d > 0.001 && d < min) {
           const push = (min - d) * 0.5, nx = dx / d, ny = dy / d;
           a.x -= nx * push; a.y -= ny * push;
@@ -1062,12 +1308,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       const qb = carrier();
       if (qb && qb.role === "QB") {
         for (const r of defense()) {
-          if (!(r.role === "DL" || r.rush) || r.down) continue;
+          if (r.down || r.diving) continue;
           const dQ = dist(r.x, r.y, qb.x, qb.y);
           if (dQ < 4.25 && dQ > 0.001) {
             const ang = angTo(qb.x, qb.y, r.x, r.y);
             r.x = qb.x + Math.cos(ang) * 4.25;
             r.y = qb.y + Math.sin(ang) * 4.25;
+            r.vx *= 0.3; r.vy *= 0.3;
           }
         }
       }
@@ -1096,54 +1343,156 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       b.z = 1.05;
     }
 
-    // juke / tackle
-    if (state.phase === "run") {
-      const c = carrier();
-      if (c && !c.down) {
-        if (c.y >= AWAY_GL) { finishPlay("td", AWAY_GL, c.x); return; }
-        if (c.x <= 0.15 || c.x >= FIELD_W - 0.15) {
-          // step out: treat as tackle at that spot
-          finishPlay("tackle", c.y, clamp(c.x, 0.6, FIELD_W - 0.6));
-          return;
-        }
-        let closest = 99, hitter = null;
-        for (const d of defense()) {
-          if (d.down || d.diving) continue;
-          const dd = dist(d.x, d.y, c.x, c.y);
-          if (dd < closest) { closest = dd; hitter = d; }
-        }
-        if (state.juke && !state.juke.resolved) {
-          state.juke.t += dt;
-          state.juke.iconX = clamp(state.juke.iconX + state.juke.dir * dt * 1.6, 0.08, 0.92);
-          if (state.juke.iconX <= 0.08 || state.juke.iconX >= 0.92) state.juke.dir *= -1;
-          if (input.flick) {
-            const inTime = Math.abs(state.juke.iconX - 0.5) < 0.28;
-            resolveJuke(inTime);
-            input.flick = 0;
-          } else if (state.juke.t > state.juke.window) {
-            resolveJuke(false);
-          }
-        } else if (hitter && closest < 3.2 && closest > 1.25 && c.immune <= 0) {
-          startJuke(hitter);
-        } else if (hitter && closest < 1.22 && c.immune <= 0) {
-          finishPlay("tackle", c.y, c.x);
-        }
+    // turf dust when the ball carrier cuts
+    if (carr && (state.phase === "run" || state.scrambling) && Math.abs(carr.vx) > 4.5 && Math.random() < dt * 6) {
+      spawnParticles(carr.x, carr.y, "#c4a36a", 3, 3.5, 0.28);
+    }
+
+    updateTackles(dt);
+  }
+
+  function pursueCarrier(d, c, spdMul) {
+    if (!d || !c) return;
+    const gap = dist(d.x, d.y, c.x, c.y);
+    const lead = clamp(0.18 + gap * 0.035, 0.18, 0.55);
+    const tx = c.x + c.vx * lead;
+    const ty = c.y + c.vy * lead;
+    let mul = spdMul || 1.12;
+    if (gap < 8) mul = Math.max(mul, 1.2);
+    if (gap < 3.5) mul = Math.max(mul, 1.32);
+    moveToward(d, tx, ty, d.speed * mul);
+    d.animState = "run";
+  }
+
+  function canBeTackled(c) {
+    if (!c || c.down) return false;
+    if (state.phase === "run") return true;
+    if (state.phase === "pass" && c.role === "QB") {
+      // sacks / scramble tackles only after the protected-pocket window
+      return state.playTime >= POCKET_SAFE;
+    }
+    return false;
+  }
+
+  function beginTackle(defender, carrier, opts) {
+    opts = opts || {};
+    state.hitStop = opts.gang ? 0.11 : 0.07;
+    state.shake = opts.gang ? 0.95 : 0.6;
+    state.flash = 0.14;
+    if (defender) {
+      defender.animState = "dive";
+      defender.diving = true;
+      defender.animT = 0;
+      defender.tumble = 0.8;
+      defender.vx = (carrier.x - defender.x) * 3;
+      defender.vy = (carrier.y - defender.y) * 3;
+    }
+    carrier.down = true;
+    carrier.animState = "down";
+    carrier.animT = 0;
+    carrier.tumble = 1;
+    carrier.vx *= 0.15; carrier.vy *= 0.15;
+    spawnParticles(carrier.x, carrier.y, "#d7b07a", 24, 8, 0.5);
+    spawnParticles(carrier.x, carrier.y, "#ffffff", 12, 6, 0.35);
+    sfx("tackle");
+    haptic(opts.gang ? [30, 20, 60] : 35);
+    finishPlay("tackle", carrier.y, carrier.x);
+  }
+
+  function breakTackle(defender, carrier) {
+    state.stiffArm = 0;
+    state.stiffUsed = true;
+    carrier.immune = 0.55;
+    state.lastJukeT = state.playTime;
+    sfx("juke");
+    haptic(18);
+    addFloater("STIFF!", carrier.x, carrier.y, "#ffe027");
+    spawnParticles(carrier.x, carrier.y, "#ffe027", 14, 7, 0.4);
+    if (defender) {
+      defender.diving = true;
+      defender.animState = "dive";
+      defender.animT = 0;
+      defender.down = true;
+      const ang = angTo(carrier.x, carrier.y, defender.x, defender.y);
+      defender.vx = Math.cos(ang) * 5;
+      defender.vy = Math.sin(ang) * 5;
+    }
+    const { rx, ry } = cameraFlatAxes();
+    carrier.vx += rx * 3.2;
+    carrier.x += rx * 0.7;
+  }
+
+  function updateTackles(dt) {
+    const c = carrier();
+    if (!c || c.down) {
+      if (state.juke) state.juke = null;
+      return;
+    }
+    if (c.y >= AWAY_GL) { finishPlay("td", AWAY_GL, c.x); return; }
+    if (state.phase === "run" && (c.x <= 0.15 || c.x >= FIELD_W - 0.15)) {
+      finishPlay("tackle", c.y, clamp(c.x, 0.6, FIELD_W - 0.6));
+      return;
+    }
+    if (state.stiffArm > 0) state.stiffArm = Math.max(0, state.stiffArm - dt);
+
+    if (!canBeTackled(c)) {
+      if (state.juke && !state.juke.resolved) {
+        state.juke.t += dt;
+        if (state.juke.t > state.juke.window) state.juke = null;
       }
-    } else if (state.phase === "pass") {
-      // sack if held too long
-      const qb = carrier();
-      if (qb) {
-        if (state.playTime >= POCKET_SAFE) {
-          for (const d of defense()) {
-            if (d.down || d.diving) continue;
-            if (dist(d.x, d.y, qb.x, qb.y) < 1.15) {
-              qb.down = true;
-              finishPlay("tackle", qb.y, qb.x);
-              break;
-            }
-          }
-        }
+      return;
+    }
+
+    const near = [];
+    for (const d of defense()) {
+      if (d.down || d.diving) continue;
+      const dd = dist(d.x, d.y, c.x, c.y);
+      if (dd < 5) near.push({ d, dd });
+    }
+    near.sort((a, b) => a.dd - b.dd);
+    const inWrap = near.filter((n) => n.dd <= TACKLE_R);
+    const closing = near.filter((n) => n.dd <= 3.05);
+
+    // Juke slider update
+    if (state.juke && !state.juke.resolved) {
+      state.juke.t += dt;
+      state.juke.iconX = clamp(state.juke.iconX + state.juke.dir * dt * 1.6, 0.08, 0.92);
+      if (state.juke.iconX <= 0.08 || state.juke.iconX >= 0.92) state.juke.dir *= -1;
+      if (input.flick) {
+        const inTime = Math.abs(state.juke.iconX - 0.5) < 0.28;
+        resolveJuke(inTime);
+        input.flick = 0;
+      } else if (state.juke.t > state.juke.window) {
+        resolveJuke(false);
+        return;
       }
+    }
+
+    if (c.immune > 0) return;
+
+    // Two or more defenders wrapping — almost always down
+    if (inWrap.length >= 2) {
+      beginTackle(inWrap[0].d, c, { gang: true });
+      return;
+    }
+
+    // Single wrap: stiff-arm may break it, otherwise tackle (juke already failed or wasn't up)
+    if (inWrap.length === 1) {
+      if (state.stiffArm > 0 && !state.stiffUsed) {
+        const chance = 0.62 - (DIFF_MUL[(state.settings && state.settings.difficulty) || "normal"] - 1) * 0.3;
+        if (Math.random() < chance) { breakTackle(inWrap[0].d, c); return; }
+        state.stiffUsed = true;
+        state.stiffArm = 0;
+      }
+      // If a juke window is still open, let it finish unless they are chest-to-chest
+      if (state.juke && !state.juke.resolved && inWrap[0].dd > 0.72) return;
+      beginTackle(inWrap[0].d, c, { gang: false });
+      return;
+    }
+
+    // Fair juke chance against a SINGLE closing defender
+    if (!state.juke && closing.length === 1 && inWrap.length === 0 && (state.playTime - (state.lastJukeT || 0) > 0.85)) {
+      startJuke(closing[0].d);
     }
   }
 
@@ -1173,27 +1522,49 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   function update(dt) {
     dt = clamp(dt, 0, 0.05);
     if (state.muted && audio.crowd) audio.crowd.gain.gain.value = 0;
+    else swellCrowd();
     updateParticles(dt);
     updateCamera(dt);
-    if (state.mode === "teams") { state.introT += dt; return; }
+    updateExtras(dt);
+    if (state.mode === "title" || state.mode === "teams" || state.mode === "settings" || state.mode === "playcall") {
+      state.introT += dt;
+      return;
+    }
     if (state.mode === "paused" || state.mode === "gameover") return;
     if (state.mode === "live") {
       if (state.tutorial) state.tutorialT += dt;
+      if (state.gameMode === "downs" && state.clock > 0) {
+        state.clock = Math.max(0, state.clock - dt);
+        if (state.clock <= 0) {
+          addBanner("Time expired", "", "#ff6b4a", 1.5);
+          saveBest();
+          state.mode = "reset";
+          state.result = "clock";
+          state.resultT = 0;
+          sfx("whistle");
+          return;
+        }
+      }
       updateLive(dt);
       return;
     }
     if (state.mode === "reset") {
       state.resultT += dt;
-      const wait = state.result === "incomplete" ? 1.25 : 1.35;
+      const wait = state.result === "incomplete" ? 1.2 : 1.45;
       if (state.resultT > wait) {
-        if (state.result === "incomplete") { setupPlay(); state.mode = "live"; }
-        else nextPlay();
+        if (state.result === "fail" || state.result === "turnover" || state.result === "clock" ||
+            (state.result === "int" && state.gameMode === "downs")) {
+          state.mode = "gameover";
+          setViewBlur(true);
+          return;
+        }
+        setupPlay();
       }
       return;
     }
     if (state.mode === "celebrate") {
       state.resultT += dt;
-      if (state.resultT > 2.3) nextPlay();
+      if (state.resultT > 2.6) nextPlay();
     }
   }
 
@@ -1239,11 +1610,27 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     g.fillStyle = "#6b4a2a"; g.fillRect(0, 0, tw, th);
     g.fillStyle = "#1a4a1e";
     g.fillRect(X(-6), Y(-6), (FIELD_W + 12) * py, (FIELD_END + 12) * py);
-    for (let z = 0; z < FIELD_END; z += 5) {
-      g.fillStyle = (z / 5) % 2 === 0 ? "#2c8a38" : "#257a31";
-      const y0 = Y(z), y1 = Y(z + 5);
-      g.fillRect(X(0), Math.min(y0, y1), FIELD_W * py, Math.abs(y1 - y0) + 0.5);
+    for (let z = 0; z < FIELD_END; z += 1) {
+      const band = Math.floor(z / 5) % 2 === 0;
+      const stripe = z % 2 === 0;
+      g.fillStyle = band ? (stripe ? "#2e9140" : "#287e36") : (stripe ? "#257a33" : "#1f6c2c");
+      const y0 = Y(z), y1 = Y(z + 1);
+      g.fillRect(X(0), Math.min(y0, y1), FIELD_W * py, Math.abs(y1 - y0) + 0.6);
     }
+    // midfield GD logo
+    (function () {
+      const cx = X(FIELD_W / 2), cy = Y(60);
+      g.save();
+      g.translate(cx, cy);
+      g.beginPath(); g.arc(0, 0, py * 5.6, 0, Math.PI * 2);
+      g.fillStyle = "rgba(20,50,24,0.55)"; g.fill();
+      g.lineWidth = 4; g.strokeStyle = "rgba(240,193,75,0.8)"; g.stroke();
+      g.font = "800 " + Math.round(py * 4.2) + "px Impact, 'Arial Black', sans-serif";
+      g.fillStyle = "rgba(255,224,60,0.8)";
+      g.textAlign = "center"; g.textBaseline = "middle";
+      g.fillText("GD", 0, 2);
+      g.restore();
+    })();
     // darker green end zones
     g.fillStyle = "#14521c";
     g.fillRect(X(0), Y(0), FIELD_W * py, EZ * py);
@@ -1370,6 +1757,147 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       r.position.set(x, 13.5, z);
       scene.add(r);
     }
+    // Jumbotron over the away end
+    const board = new THREE.Group();
+    const frame = new THREE.Mesh(new THREE.BoxGeometry(18, 8, 0.6), new THREE.MeshStandardMaterial({ color: 0x1a1a1e, metalness: 0.3, roughness: 0.5 }));
+    board.add(frame);
+    const jc = document.createElement("canvas");
+    jc.width = 512; jc.height = 256;
+    const jctx = jc.getContext("2d");
+    jctx.fillStyle = "#071018"; jctx.fillRect(0, 0, 512, 256);
+    jctx.fillStyle = "#f0c14b"; jctx.font = "800 64px Impact, sans-serif";
+    jctx.textAlign = "center"; jctx.fillText("GRIDIRON", 256, 110);
+    jctx.fillText("DRIVE", 256, 180);
+    const jtex = new THREE.CanvasTexture(jc);
+    jtex.colorSpace = THREE.SRGBColorSpace;
+    const screen = new THREE.Mesh(new THREE.PlaneGeometry(16.6, 7.2), new THREE.MeshBasicMaterial({ map: jtex }));
+    screen.position.z = 0.32;
+    board.add(screen);
+    board.position.set(midX, 18.5, FIELD_END + 26);
+    board.rotation.y = Math.PI;
+    scene.add(board);
+    gfx.jumbo = { canvas: jc, ctx: jctx, tex: jtex, mesh: board };
+    // Crowd billboards in standing-room colors (animated dots)
+    gfx.crowd = [];
+    function crowdSheet(c1, c2) {
+      const c = document.createElement("canvas");
+      c.width = 256; c.height = 64;
+      const g = c.getContext("2d");
+      for (let i = 0; i < 220; i++) {
+        g.fillStyle = Math.random() < 0.5 ? c1 : c2;
+        const x = Math.random() * 256, y = Math.random() * 64;
+        g.beginPath(); g.arc(x, y, 1.6 + Math.random(), 0, Math.PI * 2); g.fill();
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+    const homeT = crowdSheet("#c41e3a", "#f0c14b");
+    const awayT = crowdSheet("#1d4ea3", "#ffffff");
+    for (const [x, z, rot, tex] of [
+      [midX, -18, 0, homeT],
+      [midX, FIELD_END + 18, Math.PI, awayT],
+      [-18, midZ, Math.PI / 2, homeT],
+      [FIELD_W + 18, midZ, -Math.PI / 2, awayT],
+    ]) {
+      const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide });
+      const pl = new THREE.Mesh(new THREE.PlaneGeometry(48, 6.5), mat);
+      pl.position.set(x, 8.5, z);
+      pl.rotation.y = rot;
+      scene.add(pl);
+      gfx.crowd.push(pl);
+    }
+  }
+
+  function applyLighting() {
+    if (!gfx.scene) return;
+    const night = !!(state.settings && state.settings.night);
+    const sky = night ? 0x0b1220 : 0x8ec4e6;
+    const fogC = night ? 0x10182a : 0x9ac6e0;
+    gfx.scene.background = new THREE.Color(sky);
+    if (gfx.scene.fog) gfx.scene.fog.color.setHex(fogC);
+    if (gfx.scene.fog && gfx.scene.fog.far) {
+      gfx.scene.fog.near = night ? 50 : 80;
+      gfx.scene.fog.far = night ? 200 : 260;
+    }
+    if (gfx.hemi) gfx.hemi.intensity = night ? 0.28 : 0.75;
+    if (gfx.ambient) gfx.ambient.intensity = night ? 0.08 : 0.22;
+    if (gfx.sun) gfx.sun.intensity = night ? 0.15 : 1.3;
+    if (gfx.floods) for (const fl of gfx.floods) fl.intensity = night ? 1.35 : 0.18;
+    if (gfx.lamps) for (const l of gfx.lamps) l.material.emissiveIntensity = night ? 1.1 : 0.15;
+    if (gfx.renderer && THREE.ACESFilmicToneMapping) gfx.renderer.toneMappingExposure = night ? 0.92 : 1.12;
+  }
+
+  function setEzWord(key, word) {
+    const m = gfx.ezDecals && gfx.ezDecals[key];
+    if (!m || !m.userData.canvas) return;
+    const c = m.userData.canvas;
+    const g = c.getContext("2d");
+    g.clearRect(0, 0, c.width, c.height);
+    g.font = "800 150px Impact, 'Arial Black', sans-serif";
+    g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillStyle = "rgba(240,230,200,0.7)";
+    const label = (word || "END ZONE").toUpperCase();
+    g.fillText(label, 512, 136);
+    m.material.map.needsUpdate = true;
+  }
+
+  function refreshFieldArt() {
+    if (!gfx.ready) return;
+    const home = (state.team && (state.team.short || state.team.name)) || "END ZONE";
+    const away = (state.foe && (state.foe.short || state.foe.name)) || "END ZONE";
+    setEzWord("home", home);
+    setEzWord("away", away);
+    applyLighting();
+  }
+
+  function updateJumbo() {
+    const j = gfx.jumbo;
+    if (!j) return;
+    const g = j.ctx;
+    g.fillStyle = "#071018"; g.fillRect(0, 0, 512, 256);
+    g.fillStyle = "#f0c14b";
+    g.font = "800 36px Impact, sans-serif";
+    g.textAlign = "center";
+    g.fillText("GRIDIRON DRIVE", 256, 46);
+    g.fillStyle = "#fff";
+    g.font = "800 70px 'Segoe UI', Impact, sans-serif";
+    g.fillText(pad5(state.displayScore || state.score || 0), 256, 130);
+    g.font = "700 28px 'Segoe UI', sans-serif";
+    g.fillStyle = "#ffb14a";
+    if (state.gameMode === "downs") {
+      g.fillText(downLabel(state.down) + " & " + distLabel(), 256, 180);
+      const m = Math.floor(state.clock / 60), s = Math.floor(state.clock % 60);
+      g.fillText(m + ":" + String(s).padStart(2, "0"), 256, 220);
+    } else {
+      g.fillText("QUOTA  " + Math.floor(state.yardsThisPlay || 0) + "/" + (state.quota || 10), 256, 190);
+    }
+    j.tex.needsUpdate = true;
+  }
+
+  function updateExtras(dt) {
+    const t = (state.introT || 0);
+    if (gfx.crowd) {
+      for (let i = 0; i < gfx.crowd.length; i++) {
+        gfx.crowd[i].position.y = 8.5 + Math.sin(t * 2.2 + i) * 0.18;
+      }
+    }
+    if ((state._jumboT = (state._jumboT || 0) + dt) > 0.25) {
+      state._jumboT = 0;
+      updateJumbo();
+    }
+  }
+
+  function swellCrowd() {
+    if (!audio.crowd || !audio.ctx || state.muted) return;
+    const g = audio.crowd.gain.gain;
+    let target = 0.018;
+    if (state.mode === "celebrate") target = 0.14;
+    else if (state.phase === "run") target = 0.055;
+    else if (state.phase === "flight") target = 0.04;
+    else if (state.mode === "live") target = 0.025;
+    const now = audio.ctx.currentTime;
+    try { g.cancelScheduledValues(now); g.linearRampToValueAtTime(target, now + 0.3); } catch (e) { g.value = target; }
   }
 
   function init3D() {
@@ -1388,8 +1916,11 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
     if (THREE.ACESFilmicToneMapping) { renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.12; }
 
-    scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x3a5a2a, 0.75));
-    scene.add(new THREE.AmbientLight(0xffffff, 0.22));
+    const hemi = new THREE.HemisphereLight(0xcfe8ff, 0x3a5a2a, 0.75);
+    scene.add(hemi);
+    const ambient = new THREE.AmbientLight(0xffffff, 0.22);
+    scene.add(ambient);
+    gfx.hemi = hemi; gfx.ambient = ambient;
     const sun = new THREE.DirectionalLight(0xfff3d0, 1.3);
     sun.position.set(40, 55, 10);
     sun.castShadow = true;
@@ -1399,6 +1930,32 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     sun.shadow.camera.top = 30; sun.shadow.camera.bottom = -30;
     sun.shadow.bias = -0.0009; sun.shadow.normalBias = 0.03;
     scene.add(sun); scene.add(sun.target);
+    gfx.floods = [];
+    const floodMat = { color: 0xfff1c8, intensity: 0.55, distance: 90, decay: 2 };
+    for (const [x, z] of [
+      [-8, 8], [FIELD_W + 8, 8], [-8, 60], [FIELD_W + 8, 60],
+      [-8, 112], [FIELD_W + 8, 112],
+    ]) {
+      const fl = new THREE.PointLight(floodMat.color, 0.0, floodMat.distance, floodMat.decay);
+      fl.position.set(x, 16, z);
+      scene.add(fl);
+      gfx.floods.push(fl);
+      // light tower
+      const pole = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.18, 0.28, 16, 6),
+        new THREE.MeshStandardMaterial({ color: 0x6a6a70, metalness: 0.4, roughness: 0.5 })
+      );
+      pole.position.set(x, 8, z);
+      scene.add(pole);
+      const lamp = new THREE.Mesh(
+        new THREE.BoxGeometry(1.8, 0.5, 0.8),
+        new THREE.MeshStandardMaterial({ color: 0xf4e8b0, emissive: 0xf4e8b0, emissiveIntensity: 0.15 })
+      );
+      lamp.position.set(x, 16.2, z);
+      scene.add(lamp);
+      if (!gfx.lamps) gfx.lamps = [];
+      gfx.lamps.push(lamp);
+    }
 
     const ground = new THREE.Mesh(new THREE.PlaneGeometry(320, 360), new THREE.MeshStandardMaterial({ color: 0x1a3a1c, roughness: 1 }));
     ground.rotation.x = -Math.PI / 2;
@@ -1415,15 +1972,17 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     field.position.set(FIELD_W / 2, 0, FIELD_END / 2);
     field.receiveShadow = true;
     scene.add(field);
+    gfx.fieldMesh = field;
+    gfx.fieldInfo = fieldInfo;
 
     scene.add(makeGoalPost(0.15));
     scene.add(makeGoalPost(FIELD_END - 0.15));
     // faded 3D END ZONE decals
-    function ezDecal(z) {
+    function ezDecal(z, key) {
       const c = document.createElement("canvas");
       c.width = 1024; c.height = 256;
       const g = c.getContext("2d");
-      g.font = "800 170px Impact, 'Arial Black', sans-serif";
+      g.font = "800 160px Impact, 'Arial Black', sans-serif";
       g.textAlign = "center"; g.textBaseline = "middle";
       g.fillStyle = "rgba(210,235,210,0.55)";
       g.fillText("END ZONE", 512, 136);
@@ -1433,9 +1992,12 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       m.rotation.x = -Math.PI / 2;
       m.position.set(FIELD_W / 2, 0.05, z);
       scene.add(m);
+      m.userData.canvas = c;
+      if (!gfx.ezDecals) gfx.ezDecals = {};
+      gfx.ezDecals[key] = m;
     }
-    ezDecal(EZ * 0.5);
-    ezDecal(AWAY_GL + EZ * 0.5);
+    ezDecal(EZ * 0.5, "home");
+    ezDecal(AWAY_GL + EZ * 0.5, "away");
 
     buildStadiumBowl(scene);
 
@@ -1464,6 +2026,14 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     const lace = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.02, 0.03), new THREE.MeshStandardMaterial({ color: 0xf2efe8 }));
     lace.position.y = 0.1; ballGrp.add(lace);
     gfx.ballMesh = ballGrp; scene.add(ballGrp);
+    const shadow = new THREE.Mesh(
+      new THREE.CircleGeometry(0.45, 16),
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, depthWrite: false })
+    );
+    shadow.rotation.x = -Math.PI / 2;
+    shadow.position.y = 0.03;
+    scene.add(shadow);
+    gfx.ballShadow = shadow;
 
     const aimMat = new THREE.LineDashedMaterial({ color: 0x3af0ff, dashSize: 0.55, gapSize: 0.22, transparent: true, opacity: 0.95, linewidth: 2 });
     gfx.aimLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), aimMat);
@@ -1692,8 +2262,10 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       m.body.position.set(0, 0.22, 0.55);
       m.shL.rotation.x = -0.5; m.shR.rotation.x = -0.5;
     } else if (st === "down" || p.down) {
-      m.body.rotation.x = 1.25;
-      m.body.position.set(0, 0.25, 0.42);
+      const roll = Math.min(1, p.animT * 2.2);
+      m.body.rotation.x = 1.15 + roll * 0.5;
+      m.body.rotation.z = roll * 0.7 * (p.tumble ? 1 : 0.4);
+      m.body.position.set(0, 0.18 + roll * 0.05, 0.35 + roll * 0.25);
     } else if (st === "helm") {
       m.body.position.set(0, 0, 0);
       m.shL.rotation.set(-2.25, 0, 0.45);
@@ -1754,7 +2326,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       const moving = spd > 0.45;
       const freq = moving ? p.anim * 8.2 : p.anim * 2;
       const swing = Math.sin(freq) * (moving ? 0.85 : 0.06);
-      const bob = Math.abs(Math.sin(freq)) * (moving ? 0.05 : 0.01);
+      const breath = Math.sin((p.anim || 0) * 2.1) * 0.018;
+      const bob = Math.abs(Math.sin(freq)) * (moving ? 0.05 : 0) + (moving ? 0 : breath);
       m.body.position.set(0, bob, 0);
       m.body.rotation.y = moving ? Math.sin(freq) * 0.12 : 0;
       m.body.rotation.z = moving ? Math.sin(freq) * 0.05 : 0;
@@ -1798,7 +2371,20 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       y = p.animState === "down" ? 0.4 : 1.05;
     }
     gfx.ballMesh.position.set(x, y, z);
-    if (b.state === "air") { gfx.ballMesh.rotation.z += 0.2; gfx.ballMesh.rotation.x += 0.1; }
+    if (b.state === "air") {
+      const spd = Math.hypot(b.vx, b.vy, b.vz);
+      gfx.ballMesh.rotation.x += 0.55 + spd * 0.02;
+      gfx.ballMesh.rotation.z = Math.atan2(b.vy, b.vx);
+    } else if (b.attached) {
+      gfx.ballMesh.rotation.x = 0.4;
+    }
+    if (gfx.ballShadow) {
+      gfx.ballShadow.visible = true;
+      gfx.ballShadow.position.set(x, 0.03, z);
+      const s = 0.35 + Math.min(1.1, (y || 0.2) * 0.18);
+      gfx.ballShadow.scale.set(s, s, 1);
+      gfx.ballShadow.material.opacity = clamp(0.38 - (y - 0.2) * 0.04, 0.08, 0.4);
+    }
   }
 
   function updateAim3D() {
@@ -1838,12 +2424,12 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
   function updateMarkers() {
     if (!gfx.quotaLine) return;
-    const show = state.mode === "live" || state.mode === "reset" || state.mode === "celebrate";
+    const show = state.mode === "live" || state.mode === "reset" || state.mode === "celebrate" || state.mode === "playcall";
     gfx.losLine.visible = show;
     gfx.quotaLine.visible = show;
     gfx.losLine.position.z = state.los;
     gfx.quotaLine.position.z = state.firstDownY;
-    const c = state.quotaMet ? 0x3ad64a : 0xff8a1a;
+    const c = state.gameMode === "downs" ? 0xf0c14b : (state.quotaMet ? 0x3ad64a : 0xff8a1a);
     gfx.quotaLine.material.color.setHex(c);
     gfx.quotaLine.material.emissive.setHex(c);
     if (gfx.pocketCue) {
@@ -1886,7 +2472,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (!gfx.camera) return;
     const cam = gfx.camera;
     const portrait = H > W * 1.05;
-    if (state.mode === "teams" || state.mode === "gameover") {
+    if (state.mode === "title" || state.mode === "teams" || state.mode === "settings" || state.mode === "gameover" || state.mode === "playcall") {
       const t = state.introT || 0;
       cam.position.set(FIELD_W / 2 + Math.sin(t * 0.12) * 4, 14, 28);
       cam.lookAt(FIELD_W / 2, 0, 78);
@@ -1902,20 +2488,26 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       tx = state.ball.x; tz = state.ball.y; ty = Math.max(1.4, state.ball.z);
     } else if (carr) { tx = carr.x; tz = carr.y; ty = 1.5; }
 
+    const far = state.settings && state.settings.camera === "far";
     let back = portrait ? 9.2 : 8.2;
     let height = portrait ? 4.8 : 4.2;
     let lookAhead = 11;
     let fov = portrait ? 55 : 48;
-    if (state.phase === "flight") { back = 7.5; height = 5.5; lookAhead = 6; }
-    if (state.phase === "run") { back = portrait ? 8.6 : 7.8; height = 4.4; lookAhead = 10; }
-    cam.fov = fov;
+    if (state.phase === "flight") { back = 8.2; height = 5.8; lookAhead = 7; fov += 4; }
+    if (state.phase === "run") { back = portrait ? 8.4 : 7.6; height = 4.3; lookAhead = 10; }
+    if (state.mode === "celebrate") { back = 10; height = 5.2; lookAhead = 6; fov = 48; }
+    if (far) { back *= 1.28; height *= 1.22; fov -= 3; }
+    const spd = carr ? Math.hypot(carr.vx, carr.vy) : 0;
+    back += clamp(spd * 0.08, 0, 1.6);
+    fov += clamp(spd * 0.25, 0, 3);
+    cam.fov = lerp(cam.fov || fov, fov, clamp(dt * 3.2, 0, 1));
     cam.updateProjectionMatrix();
     const desired = new THREE.Vector3(lerp(tx, FIELD_W * 0.5, 0.08), height, tz - back);
     if (state.shake > 0) {
       desired.x += (Math.random() - 0.5) * state.shake * 0.5;
       desired.y += (Math.random() - 0.5) * state.shake * 0.25;
     }
-    cam.position.lerp(desired, clamp(dt * 4.2, 0, 1));
+    cam.position.lerp(desired, clamp(dt * 3.4, 0, 1));
     const look = new THREE.Vector3(tx, ty, tz + lookAhead);
     if (!gfx._look) gfx._look = look.clone();
     gfx._look.lerp(look, clamp(dt * 5, 0, 1));
@@ -1931,7 +2523,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
 
   function layout() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = gfx._dpr || Math.min(window.devicePixelRatio || 1, 2);
+    state.dprTarget = Math.min(window.devicePixelRatio || 1, 2);
     W = window.innerWidth; H = window.innerHeight;
     hud.width = Math.max(1, Math.round(W * dpr));
     hud.height = Math.max(1, Math.round(H * dpr));
@@ -2034,19 +2627,27 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     fillRound(sx + 8, top + 18, sw - 16, 26, 6, "#111");
     text(pad5(state.displayScore), sx + sw / 2, top + 32, 18, "#fff", "center", "800");
 
-    // Quota line
+    // Quota / downs box
     const qw = 86, qh = 54;
     const qx = W - pad - qw, qy = top - 2;
-    const met = state.quotaMet;
-    fillRound(qx, qy, qw, qh, 8, "#111");
-    fillRound(qx, qy, qw, 18, 8, met ? "#1e9a3a" : "#e07012");
-    // pin
-    ctx.fillStyle = met ? "#7CFF5A" : "#ffb14a";
-    ctx.beginPath(); ctx.arc(qx + 10, qy + 9, 3.5, 0, Math.PI * 2); ctx.fill();
-    text("Quota line", qx + qw / 2 + 4, qy + 9, 9, "#fff", "center", "800");
-    const gained = Math.floor(state.yardsThisPlay);
-    text(gained + "/" + state.quota, qx + qw / 2, qy + 32, 16, met ? "#7CFF5A" : "#ff9a3c", "center", "900");
-    text("yard", qx + qw / 2, qy + 46, 9, met ? "#9dff9d" : "#ffc58a", "center", "700");
+    if (state.gameMode === "downs") {
+      fillRound(qx, qy, qw, qh, 8, "#111");
+      fillRound(qx, qy, qw, 18, 8, "#1d6ad4");
+      text(downLabel(state.down) + " Down", qx + qw / 2, qy + 9, 10, "#fff", "center", "800");
+      text("& " + distLabel(), qx + qw / 2, qy + 32, 16, "#ffe027", "center", "900");
+      const m = Math.floor((state.clock || 0) / 60), s = Math.floor((state.clock || 0) % 60);
+      text(m + ":" + String(s).padStart(2, "0"), qx + qw / 2, qy + 46, 10, "#ddd", "center", "700");
+    } else {
+      const met = state.quotaMet;
+      fillRound(qx, qy, qw, qh, 8, "#111");
+      fillRound(qx, qy, qw, 18, 8, met ? "#1e9a3a" : "#e07012");
+      ctx.fillStyle = met ? "#7CFF5A" : "#ffb14a";
+      ctx.beginPath(); ctx.arc(qx + 10, qy + 9, 3.5, 0, Math.PI * 2); ctx.fill();
+      text("Quota line", qx + qw / 2 + 4, qy + 9, 9, "#fff", "center", "800");
+      const gained = Math.floor(state.yardsThisPlay);
+      text(gained + "/" + state.quota, qx + qw / 2, qy + 32, 16, met ? "#7CFF5A" : "#ff9a3c", "center", "900");
+      text("yard", qx + qw / 2, qy + 46, 9, met ? "#9dff9d" : "#ffc58a", "center", "700");
+    }
   }
 
   function drawJoystick() {
@@ -2098,6 +2699,26 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       weight: "900"
     });
     input.runBtn = { x, y, w: bw, h: bh };
+  }
+
+  function drawStiffButton() {
+    if (state.mode !== "live") return;
+    if (!(state.phase === "run" || (state.phase === "pass" && state.scrambling))) return;
+    const r = input.joy.baseR || 60;
+    const jx = input.joy.baseX || W * 0.5;
+    const jy = input.joy.baseY || H - 80;
+    const bw = 78, bh = 78;
+    const x = Math.min(W - bw - 14, jx + r + 22);
+    const y = jy - bh / 2;
+    const on = state.stiffArm > 0;
+    const used = state.stiffUsed;
+    btn(used ? "stiff-used" : "stiff", x, y, bw, bh, "STIFF", {
+      size: 16, r: 39,
+      bg: used ? "rgba(40,40,40,0.7)" : (on ? "#f0c14b" : "#8d6e1a"),
+      bd: "#fff",
+      color: used ? "#aaa" : "#fff",
+      weight: "900"
+    });
   }
 
   function drawTutorial() {
@@ -2299,6 +2920,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     btn("resume", W / 2 - bw / 2, H * 0.42, bw, 48, "RESUME", { size: 18, bg: "#1d6ad4", bd: "#fff", r: 12 });
     btn("change", W / 2 - bw / 2, H * 0.42 + 60, bw, 48, "CHANGE TEAM", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#f0c14b", r: 12 });
     btn("mute", W / 2 - bw / 2, H * 0.42 + 120, bw, 48, state.muted ? "SOUND: OFF" : "SOUND: ON", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#fff", r: 12 });
+    btn("settings", W / 2 - bw / 2, H * 0.42 + 180, bw, 48, "SETTINGS", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#f0c14b", r: 12 });
   }
 
   function drawGameOver() {
@@ -2309,10 +2931,83 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     fillRound(W / 2 - 90, H * 0.36, 180, 70, 12, "rgba(0,0,0,0.6)");
     text("SCORE", W / 2, H * 0.38 + 12, 11, "#ccc", "center", "800");
     text(pad5(state.score), W / 2, H * 0.38 + 38, 28, "#fff", "center", "900");
-    text("BEST  " + pad5(state.best), W / 2, H * 0.50, 16, "#f0c14b", "center", "800");
+    text("BEST  " + pad5(state.best), W / 2, H * 0.48, 16, "#f0c14b", "center", "800");
+    const st = state.stats || {};
+    const line = Math.round(st.yards || 0) + " yds   " + (st.tds || 0) + " TD   " + completionPct() + "%  " + (st.att || 0) + " att";
+    text(line, W / 2, H * 0.535, 13, "rgba(255,255,255,0.85)", "center", "700");
+    const reason = state.result === "int" ? "Intercepted" : state.result === "turnover" ? "Turnover on downs" : state.result === "clock" ? "Time expired" : "Drive over";
+    text(reason, W / 2, H * 0.325, 13, "rgba(255,180,140,0.9)", "center", "700");
     const bw = Math.min(240, W * 0.7);
     btn("retry", W / 2 - bw / 2, H * 0.58, bw, 50, "RETRY", { size: 18, bg: "#1d6ad4", bd: "#fff", r: 12 });
     btn("change", W / 2 - bw / 2, H * 0.58 + 62, bw, 50, "CHANGE TEAM", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#f0c14b", r: 12 });
+  }
+
+  const appIcon = new Image();
+  try { appIcon.src = "icon-512.png"; } catch (e) {}
+
+  function pulse() { return 1 + Math.sin((state.introT || 0) * 3) * 0.015; }
+
+  function drawTitle() {
+    const t = state.introT || 0;
+    ctx.fillStyle = "rgba(6,10,18,0.45)";
+    ctx.fillRect(0, 0, W, H);
+    if (appIcon.complete && appIcon.naturalWidth) {
+      const s = 96;
+      ctx.drawImage(appIcon, W / 2 - s / 2, H * 0.10, s, s);
+    }
+    text("GRIDIRON", W / 2, H * 0.28, Math.min(48, W * 0.12), "#ffe027", "center", "900", true, 8);
+    text("DRIVE", W / 2, H * 0.28 + 48, Math.min(48, W * 0.12), "#fff", "center", "900", true, 8);
+    text("Arcade football", W / 2, H * 0.28 + 82, 14, "rgba(255,255,255,0.75)", "center", "700");
+    const bw = Math.min(280, W * 0.78);
+    const x = W / 2 - bw / 2;
+    let y = H * 0.48;
+    const hbtn = 54;
+    const bob = Math.sin(t * 2.4) * 2;
+    btn("mode-quota", x, y + bob, bw, hbtn, "ARCADE  ·  QUOTA", { size: 18, bg: "#1d6ad4", bd: "#fff", r: 14 });
+    btn("mode-downs", x, y + 70, bw, hbtn, "DOWNS  ·  DRIVE", { size: 18, bg: "#0e6d4a", bd: "#f0c14b", r: 14 });
+    btn("settings", x, y + 140, bw, 48, "SETTINGS", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#fff", r: 14 });
+  }
+
+  function drawSettings() {
+    ctx.fillStyle = "rgba(6,10,18,0.62)";
+    ctx.fillRect(0, 0, W, H);
+    text("SETTINGS", W / 2, H * 0.16, 32, "#ffe027", "center", "900", true, 6);
+    const bw = Math.min(280, W * 0.8);
+    const x = W / 2 - bw / 2;
+    let y = H * 0.24;
+    const s = state.settings;
+    const row = (id, label) => {
+      btn(id, x, y, bw, 46, label, { size: 16, bg: "rgba(10,16,20,0.88)", bd: "#f0c14b", r: 12 });
+      y += 56;
+    };
+    row("set-sound", "SOUND  ·  " + (s.sound ? "ON" : "OFF"));
+    row("set-vibrate", "HAPTICS  ·  " + (s.vibrate ? "ON" : "OFF"));
+    row("set-diff", "DIFFICULTY  ·  " + String(s.difficulty || "normal").toUpperCase());
+    row("set-cam", "CAMERA  ·  " + String(s.camera || "standard").toUpperCase());
+    row("set-night", "LIGHTING  ·  " + (s.night ? "NIGHT" : "DAY"));
+    btn("set-back", x, y + 10, bw, 48, "BACK", { size: 16, bg: "#1d6ad4", bd: "#fff", r: 12 });
+  }
+
+  function drawPlayCall() {
+    ctx.fillStyle = "rgba(6,10,18,0.42)";
+    ctx.fillRect(0, 0, W, H);
+    text("CALL A PLAY", W / 2, Math.max(86, H * 0.14), 24, "#ffe027", "center", "900", true, 5);
+    const pad = 14;
+    const gridW = Math.min(W - pad * 2, 360);
+    const cellW = (gridW - 10) / 2;
+    const cellH = Math.min(110, H * 0.16);
+    const gx = (W - gridW) / 2;
+    const gy = H * 0.22;
+    PLAYBOOK.forEach((pl, i) => {
+      const cx = gx + (i % 2) * (cellW + 10);
+      const cy = gy + Math.floor(i / 2) * (cellH + 10);
+      btn("play:" + pl.id, cx, cy, cellW, cellH, "", { skipFill: true });
+      fillRound(cx, cy, cellW, cellH, 14, "rgba(10,16,24,0.88)");
+      ctx.strokeStyle = "#f0c14b"; ctx.lineWidth = 2; strokeRound(cx, cy, cellW, cellH, 14);
+      text(pl.name, cx + cellW / 2, cy + cellH * 0.4, 18, "#fff", "center", "900", true);
+      text(pl.sub, cx + cellW / 2, cy + cellH * 0.68, 12, "#f0c14b", "center", "700");
+    });
+    text("Tap a route package to snap", W / 2, gy + cellH * 2 + 36, 12, "rgba(255,255,255,0.7)", "center", "700");
   }
 
   function render() {
@@ -2323,8 +3018,15 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       ctx.fillStyle = "rgba(255,230,120," + (state.flash * 0.25) + ")";
       ctx.fillRect(0, 0, W, H);
     }
-    if (state.mode === "teams") {
+    if (state.mode === "title") {
+      drawTitle();
+    } else if (state.mode === "settings") {
+      drawSettings();
+    } else if (state.mode === "teams") {
       drawTeamSelect();
+    } else if (state.mode === "playcall") {
+      drawScoreHUD();
+      drawPlayCall();
     } else if (state.mode === "gameover") {
       drawScoreHUD();
       drawGameOver();
@@ -2335,6 +3037,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       drawScoreHUD();
       drawJoystick();
       drawRunButton();
+      drawStiffButton();
       drawThrowBanner();
       drawTutorial();
       drawJukeSlider();
@@ -2395,9 +3098,65 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return;
     }
     if (id === "back") {
-      if (state.mode === "teams") return;
       sfx("ui");
+      if (state.mode === "teams" || state.mode === "settings") { goTitle(); return; }
       goTeamSelect();
+      return;
+    }
+    if (id === "mode-quota" || id === "mode-downs") {
+      state.gameMode = id === "mode-downs" ? "downs" : "quota";
+      sfx("click");
+      haptic(10);
+      goTeamSelect();
+      return;
+    }
+    if (id && id.indexOf("play:") === 0) {
+      pickPlay(id.slice(5));
+      return;
+    }
+    if (id === "settings") {
+      sfx("ui");
+      state.settingsFrom = state.mode;
+      if (state.mode === "paused") state.pausedFrom = state.pausedFrom || "live";
+      state.mode = "settings";
+      return;
+    }
+    if (id === "set-sound") {
+      state.settings.sound = !state.settings.sound;
+      state.muted = !state.settings.sound;
+      if (audio.crowd) audio.crowd.gain.gain.value = state.muted ? 0 : 0.02;
+      saveSettings(); sfx("click"); return;
+    }
+    if (id === "set-vibrate") {
+      state.settings.vibrate = !state.settings.vibrate;
+      saveSettings(); haptic(20); sfx("click"); return;
+    }
+    if (id === "set-diff") {
+      const order = ["easy", "normal", "hard"];
+      const i = Math.max(0, order.indexOf(state.settings.difficulty));
+      state.settings.difficulty = order[(i + 1) % order.length];
+      saveSettings(); sfx("click"); return;
+    }
+    if (id === "set-cam") {
+      state.settings.camera = state.settings.camera === "far" ? "standard" : "far";
+      saveSettings(); sfx("click"); return;
+    }
+    if (id === "set-night") {
+      state.settings.night = !state.settings.night;
+      saveSettings(); applyLighting(); sfx("click"); return;
+    }
+    if (id === "set-back") {
+      sfx("ui");
+      const from = state.settingsFrom || "title";
+      state.mode = from === "paused" ? "paused" : from;
+      if (state.mode === "settings") state.mode = "title";
+      return;
+    }
+    if (id === "stiff") {
+      if (state.stiffUsed) return;
+      state.stiffArm = 0.7;
+      sfx("click");
+      haptic(8);
       return;
     }
     if (id === "pause") {
@@ -2429,14 +3188,20 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     }
     if (id === "mute") {
       state.muted = !state.muted;
+      state.settings.sound = !state.muted;
+      saveSettings();
       if (audio.crowd) audio.crowd.gain.gain.value = state.muted ? 0 : 0.02;
     }
   }
 
+  function goTitle() {
+    state.mode = "title";
+    state.aiming = false;
+    setViewBlur(true);
+  }
+
   function goTeamSelect() {
     state.mode = "teams";
-    state.players = [];
-    state.ball = null;
     state.aiming = false;
     setViewBlur(true);
   }
@@ -2493,9 +3258,33 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
   function frame(ts) {
     if (!state.lastTs) state.lastTs = ts;
-    let dt = (ts - state.lastTs) / 1000;
+    let raw = (ts - state.lastTs) / 1000;
     state.lastTs = ts;
-    if (dt > 0.1) dt = 0.1;
+    if (raw > 0.1) raw = 0.1;
+    const instFps = 1 / Math.max(raw, 0.001);
+    state.fpsEma = (state.fpsEma || 60) * 0.9 + instFps * 0.1;
+    state.adaptT = (state.adaptT || 0) + raw;
+    if (state.adaptT > 1.25 && gfx.renderer) {
+      state.adaptT = 0;
+      const target = state.dprTarget || Math.min(window.devicePixelRatio || 1, 2);
+      const want = state.fpsEma < 32 ? 1 : state.fpsEma < 45 ? Math.min(1.35, target) : target;
+      if (!gfx._dpr || Math.abs(want - gfx._dpr) > 0.2) {
+        gfx._dpr = want;
+        gfx.renderer.setPixelRatio(want);
+        layout();
+      }
+    }
+    if (state.slowMo > 0) {
+      state.slowMo -= raw;
+      if (state.slowMo <= 0) state.timeScale = 1;
+    }
+    let dt = raw;
+    if (state.hitStop > 0) {
+      state.hitStop -= raw;
+      dt = raw * 0.08;
+    } else {
+      dt = raw * (state.timeScale || 1);
+    }
     update(dt);
     render();
     state.raf = requestAnimationFrame(frame);
@@ -2511,7 +3300,12 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     throwBall,
     giveBall,
     setupPlay,
+    pickPlay,
+    playById,
+    PLAYBOOK,
     goTeamSelect,
+    goTitle,
+    beginTackle,
     teamById,
     TEAMS,
     layout,
@@ -2527,13 +3321,15 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   state.los = 40;
   state.firstDownY = 50;
   buildPlay();
-  state.mode = "teams";
+  state.mode = "title";
   state.team = null;
   setViewBlur(true);
+  applyLighting();
   requestAnimationFrame(frame);
 })();
 
   
+
 
 </script>
 </body>
