@@ -20,3 +20,7 @@ Add the game to your home screen for a standalone app icon.
 ## Run it locally
 
 Open `index.html` in a browser, or serve the folder with any static file server. The game works offline once loaded.
+
+## 3D assets
+
+Players, the football, turf, and sideline props are free CC0 models from [Kenney](https://kenney.nl/), [Poly Haven](https://polyhaven.com/a/american_football), and [ambientCG](https://ambientcg.com/view?id=Grass001). Full attribution is in [CREDITS.md](CREDITS.md) and on the in-game Credits screen. Procedural models are kept as a fallback if assets fail to load.

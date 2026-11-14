@@ -41,7 +41,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
 
   </script>
+  <script src="assets/vendor/gltf-extras.js"></script>
   <script>
+
 
 
 
@@ -202,7 +204,361 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     playerGroup: null, particleGroup: null,
     ready: false, _look: null
   };
+
   const audio = { ctx: null, crowd: null, started: false };
+
+  const assets = {
+    ready: false,
+    failed: false,
+    progress: 0,
+    status: "Loading 3D assets…",
+    gltfs: {},
+    textures: {},
+    tintCache: {},
+    propsPlaced: false,
+  };
+  const ASSET_LIST = [
+    { id: "charA", url: "assets/characters/character-male-a.glb" },
+    { id: "charC", url: "assets/characters/character-male-c.glb" },
+    { id: "ball", url: "assets/ball/american_football.glb" },
+    { id: "bench", url: "assets/props/bench.glb" },
+    { id: "cone", url: "assets/props/cone.glb" },
+    { id: "barrier", url: "assets/props/barrier.glb" },
+    { id: "stairs", url: "assets/stadium/stairs.glb" },
+    { id: "banner", url: "assets/stadium/banner.glb" },
+    { id: "column", url: "assets/stadium/column.glb" },
+    { id: "statue", url: "assets/stadium/statue.glb" },
+    { id: "grass", url: "assets/textures/grass.jpg", kind: "texture" },
+  ];
+
+  function loadGameAssets() {
+    const hasLoader = typeof THREE !== "undefined" && THREE.GLTFLoader && THREE.DefaultLoadingManager;
+    if (!hasLoader) {
+      assets.failed = true;
+      assets.ready = true;
+      assets.status = "Using built-in models";
+      assets.progress = 1;
+      return;
+    }
+    const mgr = new THREE.LoadingManager();
+    mgr.onProgress = (url, loaded, total) => {
+      assets.progress = total ? loaded / total : 0;
+      assets.status = "Loading 3D assets… " + Math.round(assets.progress * 100) + "%";
+    };
+    mgr.onLoad = () => { assets.progress = 1; onAssetsReady(); };
+    mgr.onError = (url) => { console.warn("Asset failed:", url); };
+    const gltfLoader = new THREE.GLTFLoader(mgr);
+    const texLoader = new THREE.TextureLoader(mgr);
+    let pending = ASSET_LIST.length;
+    const doneOne = () => { /* manager onLoad handles ready */ };
+    for (const item of ASSET_LIST) {
+      if (item.kind === "texture") {
+        texLoader.load(item.url, (tex) => {
+          tex.colorSpace = THREE.SRGBColorSpace || tex.colorSpace;
+          tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+          tex.anisotropy = 4;
+          assets.textures[item.id] = tex;
+          doneOne();
+        }, undefined, () => { assets.failed = true; doneOne(); });
+      } else {
+        gltfLoader.load(item.url, (gltf) => {
+          assets.gltfs[item.id] = gltf;
+          doneOne();
+        }, undefined, () => { assets.failed = true; doneOne(); });
+      }
+    }
+    // If the manager never fires (all failed immediately), time out to fallback
+    setTimeout(() => {
+      if (!assets.ready) {
+        if (!assets.gltfs.charA && !assets.gltfs.ball) assets.failed = true;
+        onAssetsReady();
+      }
+    }, 12000);
+  }
+
+  function onAssetsReady() {
+    if (assets.ready) return;
+    assets.ready = true;
+    assets.progress = 1;
+    assets.status = assets.gltfs.charA ? "Ready" : "Using built-in models";
+    try { applyLoadedGrass(); } catch (e) { console.warn(e); }
+    try { applyLoadedBall(); } catch (e) { console.warn(e); }
+    try { placeSidelineProps(); } catch (e) { console.warn(e); }
+    // Rebuild any existing players so the title/field uses the loaded models
+    for (const p of (state.players || [])) p.mesh = null;
+  }
+
+  function applyLoadedGrass() {
+    if (!assets.textures.grass || !gfx.fieldMesh) return;
+    const info = makeFieldTexture();
+    const prev = gfx.fieldMesh.material.map;
+    gfx.fieldMesh.material.map = info.tex;
+    gfx.fieldMesh.material.needsUpdate = true;
+    gfx.fieldInfo = info;
+    if (prev && prev !== info.tex) prev.dispose();
+  }
+
+  function applyLoadedBall() {
+    const gltf = assets.gltfs.ball;
+    if (!gltf || !gfx.ballMesh) return;
+    // remove procedural ball meshes, keep the group
+    while (gfx.ballMesh.children.length) gfx.ballMesh.remove(gfx.ballMesh.children[0]);
+    const model = gltf.scene.clone(true);
+    model.traverse((ch) => { if (ch.isMesh) { ch.castShadow = true; ch.receiveShadow = true; } });
+    // Poly Haven football is ~0.28 m; scale to game units (~0.34 yd)
+    model.scale.setScalar(1.15);
+    gfx.ballMesh.add(model);
+    gfx.ballIsAsset = true;
+  }
+
+  function placeSidelineProps() {
+    if (assets.propsPlaced || !gfx.scene) return;
+    const group = new THREE.Group();
+    group.name = "sideline-props";
+    gfx.propGroup = group;
+    gfx.scene.add(group);
+    const add = (id, x, y, z, rotY, scale) => {
+      const src = assets.gltfs[id] && assets.gltfs[id].scene;
+      if (!src) return;
+      const m = src.clone(true);
+      m.position.set(x, y, z);
+      m.rotation.y = rotY || 0;
+      const s = scale == null ? 1 : scale;
+      m.scale.setScalar(s);
+      m.traverse((ch) => { if (ch.isMesh) { ch.castShadow = true; ch.receiveShadow = true; } });
+      group.add(m);
+    };
+    // Benches along both sidelines
+    for (let i = 0; i < 6; i++) {
+      const z = 28 + i * 12;
+      add("bench", -2.2, 0, z, Math.PI / 2, 1.6);
+      add("bench", FIELD_W + 2.2, 0, z, -Math.PI / 2, 1.6);
+    }
+    // Construction cones as end-zone pylons + sideline markers
+    const pylons = [
+      [0.6, HOME_GL], [FIELD_W - 0.6, HOME_GL],
+      [0.6, AWAY_GL], [FIELD_W - 0.6, AWAY_GL],
+      [0.8, 60], [FIELD_W - 0.8, 60],
+    ];
+    for (const [x, z] of pylons) add("cone", x, 0, z, 0, 1.3);
+    // A few barriers near the benches
+    add("barrier", -2.4, 0, 22, Math.PI / 2, 1.4);
+    add("barrier", FIELD_W + 2.4, 0, 22, Math.PI / 2, 1.4);
+    add("barrier", -2.4, 0, 96, Math.PI / 2, 1.4);
+    add("barrier", FIELD_W + 2.4, 0, 96, Math.PI / 2, 1.4);
+    // Arena stairs as extra bleacher blocks just off the field
+    for (let i = 0; i < 5; i++) {
+      const z = 30 + i * 15;
+      add("stairs", -8.5, 0, z, Math.PI / 2, 2.2);
+      add("stairs", FIELD_W + 8.5, 0, z, -Math.PI / 2, 2.2);
+    }
+    // Banners and columns around the bowl
+    add("banner", FIELD_W / 2, 6.2, -6, 0, 2.4);
+    add("banner", FIELD_W / 2, 6.2, FIELD_END + 6, Math.PI, 2.4);
+    add("column", -10, 0, 12, 0, 1.8);
+    add("column", FIELD_W + 10, 0, 12, 0, 1.8);
+    add("column", -10, 0, FIELD_END - 12, 0, 1.8);
+    add("column", FIELD_W + 10, 0, FIELD_END - 12, 0, 1.8);
+    add("statue", -9, 0, 60, Math.PI / 2, 2.0);
+    add("statue", FIELD_W + 9, 0, 60, -Math.PI / 2, 2.0);
+    assets.propsPlaced = true;
+  }
+
+  function hexRgb(hex) {
+    const c = new THREE.Color(hex);
+    return [c.r, c.g, c.b];
+  }
+
+  function makeTeamColormap(baseTex, pal) {
+    const key = pal.id + ":" + pal.jersey + ":" + pal.helmet + ":" + pal.pants + ":" + pal.skin;
+    if (assets.tintCache[key]) return assets.tintCache[key];
+    const img = baseTex.image;
+    if (!img || !img.width) return baseTex;
+    const cnv = document.createElement("canvas");
+    cnv.width = img.width; cnv.height = img.height;
+    const g = cnv.getContext("2d");
+    g.drawImage(img, 0, 0);
+    const pix = g.getImageData(0, 0, cnv.width, cnv.height);
+    const d = pix.data;
+    const jer = hexRgb(pal.jersey), pnt = hexRgb(pal.pants), hlm = hexRgb(pal.helmet), skn = hexRgb(pal.skin);
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 3] < 8) continue;
+      const r = d[i] / 255, gv = d[i + 1] / 255, b = d[i + 2] / 255;
+      const max = Math.max(r, gv, b), min = Math.min(r, gv, b);
+      const lum = 0.22 * r + 0.7 * gv + 0.08 * b;
+      const sat = max < 1e-4 ? 0 : (max - min) / max;
+      const isSkin = r > 0.34 && r >= gv && gv > b * 0.8 && (r - b) > 0.07 && lum > 0.28 && lum < 0.92 && sat < 0.78;
+      const isLine = lum < 0.11;
+      if (isLine) continue;
+      if (isSkin) {
+        // keep relative shading on a team-specific skin
+        d[i] = Math.round(Math.min(1, skn[0] * (0.45 + lum)) * 255);
+        d[i + 1] = Math.round(Math.min(1, skn[1] * (0.45 + lum)) * 255);
+        d[i + 2] = Math.round(Math.min(1, skn[2] * (0.45 + lum)) * 255);
+        continue;
+      }
+      // Clothing / cap / shoes: tint toward jersey, with darker pixels leaning helmet
+      const src = lum < 0.28 ? hlm : (lum > 0.72 ? pnt : jer);
+      const shade = 0.35 + lum * 1.15;
+      d[i] = Math.round(clamp(src[0] * shade, 0, 1) * 255);
+      d[i + 1] = Math.round(clamp(src[1] * shade, 0, 1) * 255);
+      d[i + 2] = Math.round(clamp(src[2] * shade, 0, 1) * 255);
+    }
+    g.putImageData(pix, 0, 0);
+    const tex = new THREE.CanvasTexture(cnv);
+    tex.colorSpace = THREE.SRGBColorSpace || tex.colorSpace;
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+    tex.needsUpdate = true;
+    tex.flipY = !!baseTex.flipY;
+    assets.tintCache[key] = tex;
+    return tex;
+  }
+
+  function findBone(root, name) {
+    let found = null;
+    root.traverse((o) => { if (!found && o.name === name) found = o; });
+    return found;
+  }
+
+  function playerPalette(p) {
+    return {
+      id: (p.team || "x") + ":" + (p.jersey || ""),
+      jersey: p.jersey, helmet: p.helmet, pants: p.pants, skin: p.skin, accent: p.accent || "#fff"
+    };
+  }
+
+  function attachHelmetAndNumber(root, p) {
+    const pal = playerPalette(p);
+    if (!pal.jersey) return;
+    const head = findBone(root, "head");
+    const torso = findBone(root, "torso");
+    if (head && !head.userData.helm) {
+      const helm = new THREE.Group();
+      const shell = new THREE.Mesh(
+        new THREE.SphereGeometry(0.085, 12, 10, 0, Math.PI * 2, 0, Math.PI * 0.68),
+        new THREE.MeshStandardMaterial({ color: pal.helmet, roughness: 0.32, metalness: 0.28 })
+      );
+      shell.scale.set(1.2, 1.05, 1.25);
+      shell.position.set(0, 0.035, 0.01);
+      shell.castShadow = true;
+      helm.add(shell);
+      const stripe = new THREE.Mesh(
+        new THREE.BoxGeometry(0.02, 0.04, 0.18),
+        new THREE.MeshStandardMaterial({ color: pal.accent, roughness: 0.4 })
+      );
+      stripe.position.set(0, 0.07, 0.01);
+      helm.add(stripe);
+      // facemask
+      const barMat = new THREE.MeshStandardMaterial({ color: 0x222226, metalness: 0.6, roughness: 0.3 });
+      for (const [y, z] of [[0.0, 0.09], [-0.025, 0.085]]) {
+        const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.12, 6), barMat);
+        bar.rotation.z = Math.PI / 2;
+        bar.position.set(0, y, z);
+        helm.add(bar);
+      }
+      head.add(helm);
+      head.userData.helm = helm;
+    }
+    if (torso && !torso.userData.decal) {
+      const cnv = document.createElement("canvas");
+      cnv.width = 64; cnv.height = 64;
+      const g = cnv.getContext("2d");
+      g.clearRect(0, 0, 64, 64);
+      g.font = "900 44px Impact, 'Arial Black', sans-serif";
+      g.textAlign = "center"; g.textBaseline = "middle";
+      g.lineWidth = 6; g.strokeStyle = "#111";
+      g.strokeText(String(p.num), 32, 34);
+      g.fillStyle = pal.accent || "#fff";
+      g.fillText(String(p.num), 32, 34);
+      const tex = new THREE.CanvasTexture(cnv);
+      tex.colorSpace = THREE.SRGBColorSpace || tex.colorSpace;
+      const decal = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.09, 0.1),
+        new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, side: THREE.DoubleSide })
+      );
+      decal.position.set(0, 0.07, 0.075);
+      torso.add(decal);
+      torso.userData.decal = decal;
+    }
+  }
+
+  function retintAssetRoot(root, p) {
+    const pal = playerPalette(p);
+    if (!pal.jersey) return;
+    let baseTex = null;
+    root.traverse((ch) => {
+      if (ch.isMesh && ch.material && ch.material.map) baseTex = ch.material.map;
+    });
+    if (!baseTex || !baseTex.image) return;
+    const tinted = makeTeamColormap(baseTex, pal);
+    root.traverse((ch) => {
+      if (!ch.isMesh || !ch.material) return;
+      ch.material = ch.material.clone();
+      if (ch.material.map) ch.material.map = tinted;
+      ch.castShadow = true;
+      ch.receiveShadow = true;
+    });
+  }
+
+  const ASSET_ANIM = {
+    idle: "idle",
+    hold: "idle",
+    run: "sprint",
+    throw: "attack-melee-right",
+    catch: "pick-up",
+    celebrate: "jump",
+    down: "die",
+    dive: "fall",
+    block: "crouch",
+    juke: "sprint",
+    helm: "emote-no",
+  };
+  const ASSET_ONCE = { throw: 1, catch: 1, celebrate: 1, down: 1, dive: 1, helm: 1 };
+
+  function playAssetAnim(p) {
+    const m = p.mesh;
+    if (!m || !m.actions) return;
+    let key = p.animState || "idle";
+    if (key === "hold" && state.aiming && p.role === "QB") key = "throw";
+    let clipName = ASSET_ANIM[key] || "idle";
+    if (key === "hold" && state.aiming) clipName = "holding-right";
+    if (!m.actions[clipName]) clipName = m.actions.idle ? "idle" : Object.keys(m.actions)[0];
+    if (!clipName || m.currentAnim === clipName + ":" + key) return;
+    const next = m.actions[clipName];
+    if (!next) return;
+    if (m.currentAction && m.currentAction !== next) m.currentAction.fadeOut(0.12);
+    next.reset();
+    next.setLoop(ASSET_ONCE[key] ? THREE.LoopOnce : THREE.LoopRepeat, ASSET_ONCE[key] ? 1 : Infinity);
+    next.clampWhenFinished = !!ASSET_ONCE[key];
+    next.fadeIn(0.12);
+    next.play();
+    m.currentAction = next;
+    m.currentAnim = clipName + ":" + key;
+  }
+
+  function makeAssetCharacter(p) {
+    if (!assets.gltfs.charA || !THREE.SkeletonUtils) return null;
+    const bulky = p.role === "OL" || p.role === "DL" || p.role === "TE" || p.role === "LB";
+    const gltf = (bulky && assets.gltfs.charC) || assets.gltfs.charA;
+    const root = THREE.SkeletonUtils.clone(gltf.scene);
+    root.scale.setScalar(bulky ? 3.85 : 3.55);
+    retintAssetRoot(root, p);
+    attachHelmetAndNumber(root, p);
+    const mixer = new THREE.AnimationMixer(root);
+    const actions = {};
+    for (const clip of (gltf.animations || [])) actions[clip.name] = mixer.clipAction(clip);
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.55, 0.7, 20),
+      new THREE.MeshBasicMaterial({ color: 0xffe027, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.04;
+    ring.visible = false;
+    root.add(ring);
+    return { root, body: root, mixer, actions, currentAnim: null, currentAction: null, fromAsset: true, ring };
+  }
+
 
   function rand(a, b) { return a + Math.random() * (b - a); }
   function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
@@ -1521,12 +1877,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
   function update(dt) {
     dt = clamp(dt, 0, 0.05);
+    state.frameDt = dt;
     if (state.muted && audio.crowd) audio.crowd.gain.gain.value = 0;
     else swellCrowd();
     updateParticles(dt);
     updateCamera(dt);
     updateExtras(dt);
-    if (state.mode === "title" || state.mode === "teams" || state.mode === "settings" || state.mode === "playcall") {
+    if (state.mode === "title" || state.mode === "teams" || state.mode === "settings" || state.mode === "credits" || state.mode === "playcall") {
       state.introT += dt;
       return;
     }
@@ -1610,12 +1967,31 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     g.fillStyle = "#6b4a2a"; g.fillRect(0, 0, tw, th);
     g.fillStyle = "#1a4a1e";
     g.fillRect(X(-6), Y(-6), (FIELD_W + 12) * py, (FIELD_END + 12) * py);
-    for (let z = 0; z < FIELD_END; z += 1) {
-      const band = Math.floor(z / 5) % 2 === 0;
-      const stripe = z % 2 === 0;
-      g.fillStyle = band ? (stripe ? "#2e9140" : "#287e36") : (stripe ? "#257a33" : "#1f6c2c");
-      const y0 = Y(z), y1 = Y(z + 1);
-      g.fillRect(X(0), Math.min(y0, y1), FIELD_W * py, Math.abs(y1 - y0) + 0.6);
+    const grassImg = assets.textures.grass && (assets.textures.grass.image || assets.textures.grass.source && assets.textures.grass.source.data);
+    if (grassImg && grassImg.width) {
+      const tileYd = 10;
+      const tw = tileYd * py, th = tileYd * py;
+      for (let z = 0; z < FIELD_END; z += tileYd) {
+        for (let x = 0; x < FIELD_W; x += tileYd) {
+          const y0 = Y(z), y1 = Y(z + tileYd);
+          const yy = Math.min(y0, y1);
+          g.drawImage(grassImg, X(x), yy, tw, Math.abs(y1 - y0) + 0.5);
+        }
+      }
+      // mowing stripe overlay
+      for (let z = 0; z < FIELD_END; z += 5) {
+        g.fillStyle = (Math.floor(z / 5) % 2 === 0) ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.08)";
+        const y0 = Y(z), y1 = Y(z + 5);
+        g.fillRect(X(0), Math.min(y0, y1), FIELD_W * py, Math.abs(y1 - y0) + 0.5);
+      }
+    } else {
+      for (let z = 0; z < FIELD_END; z += 1) {
+        const band = Math.floor(z / 5) % 2 === 0;
+        const stripe = z % 2 === 0;
+        g.fillStyle = band ? (stripe ? "#2e9140" : "#287e36") : (stripe ? "#257a33" : "#1f6c2c");
+        const y0 = Y(z), y1 = Y(z + 1);
+        g.fillRect(X(0), Math.min(y0, y1), FIELD_W * py, Math.abs(y1 - y0) + 0.6);
+      }
     }
     // midfield GD logo
     (function () {
@@ -2121,6 +2497,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
 
   function makePlayerMesh(p) {
+    const assetMesh = makeAssetCharacter(p);
+    if (assetMesh) return assetMesh;
     const root = new THREE.Group();
     const body = new THREE.Group();
     const bulk = (p.role === "OL" || p.role === "DL") ? 1.13 : (p.role === "TE" || p.role === "LB") ? 1.06 : 1;
@@ -2246,6 +2624,18 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (!m) return;
     m.root.position.set(p.x, 0, p.y);
     m.root.rotation.y = Math.PI / 2 - p.facing;
+    if (m.fromAsset) {
+      if (p.animState === "down" || p.down) {
+        // die clip already drops them; keep a slight extra roll
+        m.root.rotation.z = Math.min(0.5, (p.animT || 0) * 0.6);
+      } else {
+        m.root.rotation.z = 0;
+      }
+      playAssetAnim(p);
+      if (m.mixer) m.mixer.update(state.frameDt || 0.016);
+      m.ring.visible = state.controlled === p && state.mode === "live" && state.phase === "run";
+      return;
+    }
     const spd = Math.hypot(p.vx, p.vy);
     const st = p.animState;
     // reset some joints
@@ -2472,7 +2862,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (!gfx.camera) return;
     const cam = gfx.camera;
     const portrait = H > W * 1.05;
-    if (state.mode === "title" || state.mode === "teams" || state.mode === "settings" || state.mode === "gameover" || state.mode === "playcall") {
+    if (state.mode === "title" || state.mode === "teams" || state.mode === "settings" || state.mode === "credits" || state.mode === "gameover" || state.mode === "playcall") {
       const t = state.introT || 0;
       cam.position.set(FIELD_W / 2 + Math.sin(t * 0.12) * 4, 14, 28);
       cam.lookAt(FIELD_W / 2, 0, 78);
@@ -2921,6 +3311,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     btn("change", W / 2 - bw / 2, H * 0.42 + 60, bw, 48, "CHANGE TEAM", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#f0c14b", r: 12 });
     btn("mute", W / 2 - bw / 2, H * 0.42 + 120, bw, 48, state.muted ? "SOUND: OFF" : "SOUND: ON", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#fff", r: 12 });
     btn("settings", W / 2 - bw / 2, H * 0.42 + 180, bw, 48, "SETTINGS", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#f0c14b", r: 12 });
+    btn("credits", W / 2 - bw / 2, H * 0.42 + 240, bw, 48, "CREDITS", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#fff", r: 12 });
   }
 
   function drawGameOver() {
@@ -2962,10 +3353,69 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     const x = W / 2 - bw / 2;
     let y = H * 0.48;
     const hbtn = 54;
-    const bob = Math.sin(t * 2.4) * 2;
-    btn("mode-quota", x, y + bob, bw, hbtn, "ARCADE  ·  QUOTA", { size: 18, bg: "#1d6ad4", bd: "#fff", r: 14 });
-    btn("mode-downs", x, y + 70, bw, hbtn, "DOWNS  ·  DRIVE", { size: 18, bg: "#0e6d4a", bd: "#f0c14b", r: 14 });
-    btn("settings", x, y + 140, bw, 48, "SETTINGS", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#fff", r: 14 });
+    if (!assets.ready) {
+      const barW = bw, barH = 18;
+      fillRound(x, y + 20, barW, barH, 9, "rgba(8,14,22,0.85)");
+      ctx.strokeStyle = "#f0c14b"; ctx.lineWidth = 2; strokeRound(x, y + 20, barW, barH, 9);
+      const pct = clamp(assets.progress || 0, 0, 1);
+      if (pct > 0.02) fillRound(x + 3, y + 23, (barW - 6) * pct, barH - 6, 6, "#ffe027");
+      text(assets.status || "Loading 3D assets…", W / 2, y + 56, 13, "#fff", "center", "700");
+    } else {
+      const bob = Math.sin(t * 2.4) * 2;
+      btn("mode-quota", x, y + bob, bw, hbtn, "ARCADE  ·  QUOTA", { size: 18, bg: "#1d6ad4", bd: "#fff", r: 14 });
+      btn("mode-downs", x, y + 70, bw, hbtn, "DOWNS  ·  DRIVE", { size: 18, bg: "#0e6d4a", bd: "#f0c14b", r: 14 });
+      btn("settings", x, y + 140, bw, 48, "SETTINGS", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#fff", r: 14 });
+      btn("credits", x, y + 200, bw, 44, "CREDITS", { size: 15, bg: "rgba(10,16,20,0.85)", bd: "#fff", r: 14 });
+    }
+  }
+
+  const CREDITS_LINES = [
+    "GRIDIRON DRIVE  ·  3D ASSET CREDITS",
+    "",
+    "Kenney  ·  Mini Characters (CC0 1.0)",
+    "Animated player models (idle, run, throw, catch, fall…)",
+    "https://kenney.nl/assets/mini-characters",
+    "",
+    "Kenney  ·  Mini Arena (CC0 1.0)",
+    "Stairs, banners, columns, statue  (extra credit: Tony Schär)",
+    "https://kenney.nl/assets/mini-arena",
+    "",
+    "Kenney  ·  Furniture Kit (CC0 1.0)",
+    "Sideline benches",
+    "https://kenney.nl/assets/furniture-kit",
+    "",
+    "Kenney  ·  City Kit (Roads) (CC0 1.0)",
+    "Construction cones (end-zone pylons) and barriers",
+    "https://kenney.nl/assets/city-kit-roads",
+    "",
+    "Poly Haven  ·  American Football (CC0 1.0)",
+    "Photogrammetry football used as the game ball",
+    "https://polyhaven.com/a/american_football",
+    "",
+    "ambientCG  ·  Grass 001 (CC0 1.0)",
+    "Tiled turf texture on the playing field",
+    "https://ambientcg.com/view?id=Grass001",
+    "",
+    "three.js GLTFLoader & SkeletonUtils  ·  MIT",
+    "https://github.com/mrdoob/three.js",
+    "",
+    "All of the above licenses allow use and redistribution",
+    "in a public web game. Procedural models remain as fallback.",
+    "Thanks to Kenney, Poly Haven, ambientCG, and three.js.",
+  ];
+
+  function drawCredits() {
+    ctx.fillStyle = "rgba(6,10,18,0.72)";
+    ctx.fillRect(0, 0, W, H);
+    text("CREDITS", W / 2, 46, 28, "#ffe027", "center", "900", true, 6);
+    const startY = 78;
+    const lineH = Math.min(18, (H - 150) / CREDITS_LINES.length);
+    CREDITS_LINES.forEach((ln, i) => {
+      const gold = ln.indexOf("http") === 0 || ln.indexOf("Kenney") === 0 || ln.indexOf("Poly") === 0 || ln.indexOf("ambient") === 0 || ln.indexOf("three.js") === 0 || ln.indexOf("GRIDIRON") === 0;
+      text(ln, W / 2, startY + i * lineH, gold && ln.indexOf("http") !== 0 ? 12 : 11, gold ? "#f0c14b" : "rgba(255,255,255,0.85)", "center", "700");
+    });
+    const bw = Math.min(240, W * 0.7);
+    btn("credits-back", W / 2 - bw / 2, H - 70, bw, 46, "BACK", { size: 16, bg: "#1d6ad4", bd: "#fff", r: 12 });
   }
 
   function drawSettings() {
@@ -3020,6 +3470,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     }
     if (state.mode === "title") {
       drawTitle();
+    } else if (state.mode === "credits") {
+      drawCredits();
     } else if (state.mode === "settings") {
       drawSettings();
     } else if (state.mode === "teams") {
@@ -3099,7 +3551,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     }
     if (id === "back") {
       sfx("ui");
-      if (state.mode === "teams" || state.mode === "settings") { goTitle(); return; }
+      if (state.mode === "teams" || state.mode === "settings" || state.mode === "credits") { goTitle(); return; }
       goTeamSelect();
       return;
     }
@@ -3119,6 +3571,17 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       state.settingsFrom = state.mode;
       if (state.mode === "paused") state.pausedFrom = state.pausedFrom || "live";
       state.mode = "settings";
+      return;
+    }
+    if (id === "credits") {
+      sfx("ui");
+      state.creditsFrom = state.mode;
+      state.mode = "credits";
+      return;
+    }
+    if (id === "credits-back") {
+      sfx("ui");
+      state.mode = state.creditsFrom || "title";
       return;
     }
     if (id === "set-sound") {
@@ -3309,6 +3772,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     teamById,
     TEAMS,
     layout,
+    assets,
   };
 
   W = window.innerWidth || 800;
@@ -3325,10 +3789,12 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   state.team = null;
   setViewBlur(true);
   applyLighting();
+  loadGameAssets();
   requestAnimationFrame(frame);
 })();
 
   
+
 
 
 </script>
