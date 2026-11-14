@@ -4,10 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Gridiron Drive" />
   <meta name="mobile-web-app-capable" content="yes" />
-  <meta name="theme-color" content="#0b1d12" />
+  <meta name="theme-color" content="#17345c" />
   <title>Gridiron Drive</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2317345c'/%3E%3Ccircle cx='32' cy='32' r='14' fill='%23e8b54a'/%3E%3C/svg%3E" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png" />
+  <link rel="icon" type="image/x-icon" href="favicon.ico" />
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body {
@@ -37,6 +42,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
   </script>
   <script>
+
 
 (() => {
   "use strict";
@@ -487,6 +493,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     state.targetRecv = wrz;
     state.aiming = false;
     state.aimCommit = 0;
+    state.scrambling = false;
     state.aimAngle = Math.PI / 2;
     state.yardsThisPlay = 0;
     state.quotaMet = false;
@@ -574,16 +581,46 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     p.vy = lerp(p.vy, (ny / mag) * spd, clamp(dt * 10, 0, 1));
     p.facing = Math.atan2(p.vy, p.vx);
   }
+  function cameraFlatAxes() {
+    // Flat world axes from the third-person camera: +forward = away from camera
+    // (downfield in this game), +right = screen-right. World x is sideline, world y is downfield (three.js z).
+    let fx = 0, fy = 1, rx = 1, ry = 0;
+    const cam = gfx.camera;
+    if (cam && cam.matrixWorld) {
+      cam.updateMatrixWorld();
+      const e = cam.matrixWorld.elements;
+      // Camera forward is the local -Z axis in world space.
+      let dx = -e[8], dz = -e[10];
+      const len = Math.hypot(dx, dz);
+      if (len > 1e-6) { fx = dx / len; fy = dz / len; }
+      // right = world-up (0,1,0) × forward
+      rx = fy;
+      ry = -fx;
+    }
+    return { fx, fy, rx, ry };
+  }
+  function rawStick() {
+    // sx = screen-right, sy = screen-up (stick / keys as the player sees them)
+    let sx = 0, sy = 0;
+    if (input.joy.active && (input.joy.nx || input.joy.ny)) { sx += input.joy.nx; sy += input.joy.ny; }
+    if (input.keys.ArrowLeft || input.keys.a || input.keys.A) sx -= 1;
+    if (input.keys.ArrowRight || input.keys.d || input.keys.D) sx += 1;
+    if (input.keys.ArrowUp || input.keys.w || input.keys.W) sy += 1;
+    if (input.keys.ArrowDown || input.keys.s || input.keys.S) sy -= 1;
+    const m = Math.hypot(sx, sy);
+    if (m > 1) { sx /= m; sy /= m; }
+    return { x: sx, y: sy };
+  }
   function getMoveAxis() {
-    let x = 0, y = 0;
-    if (input.joy.active && (input.joy.nx || input.joy.ny)) { x += input.joy.nx; y += input.joy.ny; }
-    if (input.keys.ArrowLeft || input.keys.a || input.keys.A) x -= 1;
-    if (input.keys.ArrowRight || input.keys.d || input.keys.D) x += 1;
-    if (input.keys.ArrowUp || input.keys.w || input.keys.W) y += 1;
-    if (input.keys.ArrowDown || input.keys.s || input.keys.S) y -= 1;
-    const m = Math.hypot(x, y);
-    if (m > 1) { x /= m; y /= m; }
-    return { x, y };
+    const s = rawStick();
+    const { fx, fy, rx, ry } = cameraFlatAxes();
+    // Map stick (screen-up, screen-right) into world x/y so movement is camera-relative.
+    return {
+      x: s.x * rx + s.y * fx,
+      y: s.x * ry + s.y * fy,
+      sx: s.x,
+      sy: s.y
+    };
   }
 
   function snappedReceiver() {
@@ -880,8 +917,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   function updateLive(dt) {
     state.playTime += dt;
     const axis = getMoveAxis();
-    // flick detection
-    const nx = axis.x;
+    // flick uses screen-left/right so a juke still matches the swipe on screen
+    const nx = axis.sx;
     if (Math.abs(nx - input.prevNx) > 0.45 && Math.abs(nx) > 0.5) input.flick = nx > 0 ? 1 : -1;
     input.prevNx = nx;
 
@@ -889,43 +926,49 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       const qb = carrier();
       if (qb && qb.role === "QB") {
         const mag = Math.hypot(axis.x, axis.y);
-        // slide in the pocket first — joystick always moves the QB
-        if (mag > 0.08) {
-          steerPlayer(qb, axis.x, axis.y * 0.75, dt, state.aiming ? 0.42 : 0.88);
+        const stickMag = Math.hypot(axis.sx, axis.sy);
+        if (state.scrambling) {
+          // RUN mode: joystick moves the QB camera-relative (can leave the pocket)
+          if (mag > 0.08) steerPlayer(qb, axis.x, axis.y, dt, 1);
+          else steerPlayer(qb, 0, 0, dt, 0.5);
+          if (qb.animState !== "throw") qb.animState = Math.hypot(qb.vx, qb.vy) > 0.5 ? "run" : "hold";
         } else {
-          steerPlayer(qb, 0, 0, dt, 0.5);
-        }
-        const px = qb.snapX, py = qb.snapY;
-        qb.x = clamp(qb.x, px - 4.3, px + 4.3);
-        qb.y = clamp(qb.y, py - 2.8, Math.min(py + 2.4, state.los - 3.1));
-        // commit to a throw by holding the stick downfield
-        const ang = mag > 0.08 ? Math.atan2(axis.y, axis.x) : state.aimAngle;
-        const towardField = mag > 0.55 && Math.abs(normAng(ang - Math.PI / 2)) < 1.15;
-        if (!state.aiming) {
-          if (towardField) {
-            state.aimCommit = (state.aimCommit || 0) + dt;
-            if (state.aimCommit > 0.18) {
-              state.aiming = true;
-              state.aimAngle = ang;
-            }
-          } else {
-            state.aimCommit = Math.max(0, (state.aimCommit || 0) - dt * 2);
-          }
-        } else {
-          if (mag > 0.08) state.aimAngle = ang;
-          else if (input.mouse.down) {
+          // Pocket: stick aims (camera-relative). QB stays put or slides only laterally, slowly.
+          // Holding the stick downfield must NOT run the QB past the line.
+          if (stickMag > 0.08) {
+            const { rx, ry } = cameraFlatAxes();
+            const lat = axis.sx;
+            steerPlayer(qb, rx * lat, ry * lat, dt, 0.28);
+            state.aiming = true;
+            state.aimAngle = Math.atan2(axis.y, axis.x);
+            state.targetRecv = snappedReceiver();
+          } else if (input.mouse.down && !input.joy.active) {
             const w = screenToWorld(input.mouse.x, input.mouse.y);
             state.aimAngle = angTo(qb.x, qb.y, w.x, w.y);
+            state.aiming = true;
+            state.targetRecv = snappedReceiver();
+            steerPlayer(qb, 0, 0, dt, 0.5);
+          } else {
+            steerPlayer(qb, 0, 0, dt, 0.5);
           }
-          state.targetRecv = snappedReceiver();
+          const px = qb.snapX, py = qb.snapY;
+          qb.x = clamp(qb.x, px - 4.3, px + 4.3);
+          qb.y = clamp(qb.y, py - 1.6, Math.min(py + 0.8, state.los - 3.1));
+          if (qb.animState !== "throw") qb.animState = "hold";
         }
       }
     } else if (state.phase === "run") {
       const c = carrier();
       if (c && c.team === "home" && !c.down) {
-        // auto-run forward, stick only steers left/right
-        const steer = clamp(axis.x, -1, 1);
-        steerPlayer(c, steer, 1, dt, 1);
+        // Auto-run downfield (camera forward) plus full camera-relative stick:
+        // stick up = downfield/away from camera, stick right = screen-right.
+        const { fx, fy } = cameraFlatAxes();
+        let mx = fx * 0.85 + axis.x;
+        let my = fy * 0.85 + axis.y;
+        const mm = Math.hypot(mx, my);
+        if (mm > 0.001) { mx /= mm; my /= mm; }
+        else { mx = fx; my = fy; }
+        steerPlayer(c, mx, my, dt, 1);
         // yards & score tick
         const yds = Math.max(0, c.y - state.los);
         if (yds > state.yardsThisPlay) {
@@ -2038,6 +2081,25 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     ctx.strokeStyle = "rgba(0,0,0,0.15)"; ctx.lineWidth = 2; ctx.stroke();
   }
 
+  function drawRunButton() {
+    if (state.mode !== "live" || state.phase !== "pass") return;
+    const r = input.joy.baseR || 60;
+    const jx = input.joy.baseX || W * 0.5;
+    const jy = input.joy.baseY || H - 80;
+    const bw = 78, bh = 78;
+    const x = Math.min(W - bw - 14, jx + r + 22);
+    const y = jy - bh / 2;
+    const on = !!state.scrambling;
+    btn(on ? "passmode" : "run", x, y, bw, bh, on ? "PASS" : "RUN", {
+      size: 18, r: 39,
+      bg: on ? "#1d6ad4" : "#c62828",
+      bd: "#ffffff",
+      color: "#fff",
+      weight: "900"
+    });
+    input.runBtn = { x, y, w: bw, h: bh };
+  }
+
   function drawTutorial() {
     if (!state.tutorial || state.mode !== "live" || state.phase !== "pass") return;
     const t = state.tutorialT;
@@ -2272,6 +2334,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     } else {
       drawScoreHUD();
       drawJoystick();
+      drawRunButton();
       drawThrowBanner();
       drawTutorial();
       drawJukeSlider();
@@ -2313,12 +2376,12 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
   function pointerUp(id) {
     if (input.joy.active && input.joy.id === id) {
-      const wasAim = state.aiming && state.mode === "live" && state.phase === "pass";
+      const wasAim = state.aiming && !state.scrambling && state.mode === "live" && state.phase === "pass";
       input.joy.active = false; input.joy.id = null; input.joy.nx = 0; input.joy.ny = 0;
       if (wasAim) throwBall();
     }
     if (input.mouse.down) {
-      const wasAim = state.aiming && state.mode === "live" && state.phase === "pass" && !input.joy.active;
+      const wasAim = state.aiming && !state.scrambling && state.mode === "live" && state.phase === "pass" && !input.joy.active;
       input.mouse.down = false;
       if (wasAim) throwBall();
     }
@@ -2348,6 +2411,22 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (id === "resume") { state.mode = state.pausedFrom || "live"; sfx("ui"); return; }
     if (id === "change") { sfx("ui"); goTeamSelect(); return; }
     if (id === "retry") { sfx("ui"); if (state.team) startRun(); return; }
+    if (id === "run") {
+      if (state.mode === "live" && state.phase === "pass") {
+        state.scrambling = true;
+        state.aiming = false;
+        state.aimCommit = 0;
+        sfx("ui");
+      }
+      return;
+    }
+    if (id === "passmode") {
+      if (state.mode === "live" && state.phase === "pass") {
+        state.scrambling = false;
+        sfx("ui");
+      }
+      return;
+    }
     if (id === "mute") {
       state.muted = !state.muted;
       if (audio.crowd) audio.crowd.gain.gain.value = state.muted ? 0 : 0.02;
@@ -2391,15 +2470,21 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       else if (state.mode === "paused") handleBtn("resume");
       return;
     }
+    if (e.key === "r" || e.key === "R") {
+      if (state.mode === "live" && state.phase === "pass") {
+        handleBtn(state.scrambling ? "passmode" : "run");
+      }
+      return;
+    }
     if (e.key === "Enter" || e.key === " ") {
       if (state.mode === "gameover") handleBtn("retry");
       else if (state.mode === "paused") handleBtn("resume");
-      else if (state.mode === "live" && state.phase === "pass") { state.aiming = true; }
+      else if (state.mode === "live" && state.phase === "pass" && !state.scrambling) { state.aiming = true; }
     }
   });
   window.addEventListener("keyup", (e) => {
     input.keys[e.key] = false;
-    if ((e.key === "Enter" || e.key === " ") && state.mode === "live" && state.phase === "pass" && state.aiming) {
+    if ((e.key === "Enter" || e.key === " ") && state.mode === "live" && state.phase === "pass" && state.aiming && !state.scrambling) {
       throwBall();
     }
   });
@@ -2418,9 +2503,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
   window.__GRIDIRON__ = {
     getState: () => state,
+    getInput: () => input,
+    getMoveAxis,
+    cameraFlatAxes,
     selectTeam,
     startRun,
     throwBall,
+    giveBall,
     setupPlay,
     goTeamSelect,
     teamById,
@@ -2445,6 +2534,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 })();
 
   
+
 </script>
 </body>
 </html>

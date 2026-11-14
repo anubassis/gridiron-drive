@@ -1,0 +1,25 @@
+{
+  "name": "Gridiron Drive",
+  "short_name": "Gridiron Drive",
+  "description": "A 3D mobile American football arcade game.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#17345c",
+  "background_color": "#07140c",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
