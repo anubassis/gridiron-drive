@@ -13,7 +13,11 @@ Pick Arcade Quota or Downs Drive, then choose a team from the Pacific or Central
 
 **Phone:** call a play, hold the joystick to aim (the cyan line snaps to a receiver), and release to throw. **RUN** scrambles the quarterback; **STIFF** can break one tackle. After a catch, the stick steers the runner — up is downfield, left and right match the screen. Flick left or right when the juke slider appears to dodge a defender.
 
-**Computer:** WASD or arrows to aim or steer, Space to throw, R to scramble.
+On defense (Downs Drive, after your drive ends, or Defense Drill from the title), pick a coverage, steer your highlighted defender, **SWITCH** to the player nearest the ball, **TACKLE** to dive, and **SWAT** to bat or intercept a pass. The scoreboard tracks both teams until the clock runs out.
+
+Pause has Resume, Restart, Settings, and Quit to Menu. The back arrow asks “Leave game?” before returning to the title.
+
+**Computer:** WASD or arrows to aim or steer, Space to throw, R to scramble. On defense, T dives, F/J swats, Tab switches.
 
 Add the game to your home screen for a standalone app icon.
 

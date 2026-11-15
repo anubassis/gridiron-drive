@@ -22,8 +22,8 @@
       font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
     }
     #view, #game { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
-    #view { z-index: 0; }
-    #game { z-index: 1; background: transparent; cursor: default; }
+    #view { z-index: 0; pointer-events: none; }
+    #game { z-index: 2; background: transparent; cursor: default; touch-action: none; }
   </style>
 </head>
 <body>
@@ -43,6 +43,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   </script>
   <script src="assets/vendor/gltf-extras.js"></script>
   <script>
+
 
 
 
@@ -123,7 +124,19 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     catchSpotY: 0,
     pausedFrom: "live",
     celebration: null,
-    gameMode: "quota", // quota | downs
+    gameMode: "quota", // quota | downs | drill
+    possession: "home", // home = user offense, away = user defense
+    offDir: 1,
+    homeScore: 0,
+    awayScore: 0,
+    defCall: "cover2",
+    leavePrompt: false,
+    userDive: 0,
+    userSwat: 0,
+    pendingSpotY: null,
+    pendingSpotX: null,
+    aiPlan: null,
+    aiThrowAt: 0,
     down: 1,
     distance: 10,
     clock: 120,
@@ -163,6 +176,22 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   state.muted = !state.settings.sound;
   const DIFF_MUL = { easy: 0.86, normal: 1, hard: 1.16 };
   const TACKLE_R = 1.08;
+
+  function odir() { return state.offDir < 0 ? -1 : 1; }
+  function isUserOffense() { return state.gameMode !== "drill" && state.possession !== "away"; }
+  function offTeam() { return isUserOffense() ? "home" : "away"; }
+  function defTeam() { return offTeam() === "home" ? "away" : "home"; }
+  function goalY() { return odir() > 0 ? AWAY_GL : HOME_GL; }
+  function yardsGained(y) { return (y - state.los) * odir(); }
+  function crossedGoal(y) { return odir() > 0 ? y >= AWAY_GL : y <= HOME_GL; }
+  function crossedLine(y, line) { return odir() > 0 ? y >= line : y <= line; }
+
+  const DEF_CALLS = [
+    { id: "manblitz", name: "Man Blitz", sub: "Pressure the QB" },
+    { id: "cover2", name: "Cover 2", sub: "Two-deep zone" },
+    { id: "cover3", name: "Cover 3", sub: "Three-deep zone" },
+    { id: "prevent", name: "Prevent", sub: "Bend, don't break" },
+  ];
 
   function haptic(pattern) {
     if (!state.settings || !state.settings.vibrate) return;
@@ -873,13 +902,20 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     const bx = clamp(state.ballX, 16, FIELD_W - 16);
     const los = state.los;
     const f = formationOffsets();
+    const dir = odir();
+    const oTeam = offTeam();
+    const dTeam = defTeam();
+    const offFacing = dir > 0 ? Math.PI / 2 : -Math.PI / 2;
+    const defFacing = dir > 0 ? -Math.PI / 2 : Math.PI / 2;
     const off = [], def = [];
     const o = (role, num, key, spd) => {
-      const p = makePlayer("home", role, num, bx + f[key].x, los + f[key].y, spd);
+      const p = makePlayer(oTeam, role, num, bx + f[key].x, los + dir * f[key].y, spd);
+      p.facing = offFacing;
       off.push(p); return p;
     };
     const d = (role, num, key, spd, opts) => {
-      const p = makePlayer("away", role, num, bx + f[key].x, los + f[key].y, spd * difficulty(), opts);
+      const p = makePlayer(dTeam, role, num, bx + f[key].x, los + dir * f[key].y, spd * difficulty(), opts);
+      p.facing = defFacing;
       def.push(p); return p;
     };
     const qb = o("QB", (state.team && state.team.num) || 12, "QB", 7.1);
@@ -913,15 +949,15 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     const scheme = Math.random() < 0.55 ? "man" : "zone";
     state.coverScheme = scheme;
     cbx.cover = wrx; cbz.cover = wrz;
-    lb1.zone = { x: bx - 6, y: los + 9 };
-    lb2.zone = { x: bx + 6, y: los + 10 };
-    sfty.zone = { x: bx + 1, y: los + 16 };
+    lb1.zone = { x: bx - 6, y: los + dir * 9 };
+    lb2.zone = { x: bx + 6, y: los + dir * 10 };
+    sfty.zone = { x: bx + 1, y: los + dir * 16 };
     if (scheme === "zone") {
       cbx.cover = null; cbz.cover = null;
-      cbx.zone = { x: wrx.x, y: los + 8 };
-      cbz.zone = { x: wrz.x, y: los + 8 };
-      sfty.zone = { x: bx, y: los + 18 };
-      slot && (lb1.zone = { x: bx - 8, y: los + 11 });
+      cbx.zone = { x: wrx.x, y: los + dir * 8 };
+      cbz.zone = { x: wrz.x, y: los + dir * 8 };
+      sfty.zone = { x: bx, y: los + dir * 18 };
+      slot && (lb1.zone = { x: bx - 8, y: los + dir * 11 });
     } else {
       // man: LB shadows the slot, safety help over the top
       lb1.cover = slot;
@@ -932,9 +968,11 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     qb.animState = "hold";
     state.players = off.concat(def);
     state.ball = { x: qb.x, y: qb.y, z: 1.15, vx: 0, vy: 0, vz: 0, attached: qb, state: "held", airTime: 0, originX: qb.x, originY: qb.y };
-    state.controlled = qb;
+    state.controlled = isUserOffense() ? qb : (lb2 || sfty || lb1);
     state.phase = "pass";
     state.targetRecv = wrz;
+    state.aiPlan = null;
+    state.aiThrowAt = 0;
     state.aiming = false;
     state.aimCommit = 0;
     state.scrambling = false;
@@ -950,8 +988,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
 
   function carrier() { return state.ball && state.ball.attached ? state.ball.attached : null; }
-  function offense() { return state.players.filter((p) => p.team === "home"); }
-  function defense() { return state.players.filter((p) => p.team === "away"); }
+  function offense() { return state.players.filter((p) => p.team === offTeam()); }
+  function defense() { return state.players.filter((p) => p.team === defTeam()); }
   function receivers() { return offense().filter((p) => p.role === "WR" || p.role === "TE" || p.role === "RB"); }
 
   function pickOpponent(team) {
@@ -972,14 +1010,33 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     state.score = 0;
     state.displayScore = 0;
     state.playIndex = 0;
+    state.homeScore = 0;
+    state.awayScore = 0;
+    state.leavePrompt = false;
+    state.userDive = 0;
+    state.userSwat = 0;
     resetStats();
     if (state.gameMode === "downs") {
+      state.possession = "home";
+      state.offDir = 1;
       state.los = 25;
       state.down = 1;
       state.distance = 10;
       state.firstDownY = 35;
       state.clock = 120;
+    } else if (state.gameMode === "drill") {
+      state.possession = "away";
+      state.offDir = -1;
+      state.los = 72;
+      state.down = 1;
+      state.distance = 15;
+      state.firstDownY = 57;
+      state.clock = 0;
+      state.quota = 15;
+      state.playIndex = 0;
     } else {
+      state.possession = "home";
+      state.offDir = 1;
       state.quota = 10;
       state.los = 32;
       state.firstDownY = 42;
@@ -995,11 +1052,14 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
   function nextPlay() {
     if (state.gameMode === "downs") {
-      // new drive after a TD
-      state.los = 25;
-      state.down = 1;
-      state.distance = 10;
-      state.firstDownY = 35;
+      changePossession("td", state.los, state.ballX);
+      return;
+    }
+    if (state.gameMode === "drill") {
+      state.playIndex++;
+      state.los = clamp(72 - state.playIndex * 2, 55, 80);
+      state.distance = Math.max(10, 15 - state.playIndex);
+      state.firstDownY = state.los + odir() * state.distance;
       state.ballX = FIELD_W * 0.5 + rand(-3, 3);
       setupPlay();
       return;
@@ -1017,7 +1077,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     const rel = (p, pts) => {
       if (!p) return;
       p.routeI = 0;
-      p.route = (pts || []).map(([dx, dy]) => ({ x: p.x + dx, y: p.y + dy }));
+      const dir = odir();
+      p.route = (pts || []).map(([dx, dy]) => ({ x: p.x + dx, y: p.y + dir * dy }));
     };
     const r = play.routes || {};
     rel(state._recv.WRX, r.WRX);
@@ -1041,23 +1102,47 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
 
   function setupPlay() {
-    const remain = AWAY_GL - state.los;
+    const remain = Math.abs(goalY() - state.los);
     if (state.gameMode === "quota") {
       if (state.quota > remain) state.quota = Math.max(5, Math.round(remain));
       state.firstDownY = Math.min(AWAY_GL, state.los + state.quota);
+    } else if (state.gameMode === "drill") {
+      state.firstDownY = clamp(state.los + odir() * (state.distance || 15), HOME_GL, AWAY_GL);
     } else {
-      state.distance = Math.max(1, Math.round((state.firstDownY - state.los) * 10) / 10);
-      if (state.firstDownY > AWAY_GL) state.firstDownY = AWAY_GL;
+      state.distance = Math.max(1, Math.round(Math.abs(state.firstDownY - state.los) * 10) / 10);
+      state.firstDownY = clamp(state.firstDownY, HOME_GL, AWAY_GL);
+    }
+    // AI punts on 4th and long instead of running a play
+    if (!isUserOffense() && state.gameMode === "downs" && state.down >= 4 && state.distance > 3 && !state.autoSnap) {
+      state.pendingSpotY = state.los;
+      state.pendingSpotX = state.ballX;
+      addBanner("They punt", "", "#5ad7ff", 1.3);
+      changePossession("punt", state.los, state.ballX);
+      return;
     }
     buildPlay();
     state.phase = "pre";
     setMsg("", 0);
-    if (state.autoSnap) pickPlay(state.playId || "go");
-    else state.mode = "playcall";
+    if (!isUserOffense()) {
+      if (!isUserOffense()) state.tutorial = false;
+      if (state.autoSnap) callDefense(state.defCall || "cover2");
+      else state.mode = "defcall";
+    } else if (state.autoSnap) {
+      pickPlay(state.playId || "go");
+    } else {
+      state.mode = "playcall";
+    }
   }
 
   function setViewBlur(on) {
-    if (view) view.style.filter = on ? "blur(7px) saturate(0.9) brightness(0.82)" : "none";
+    if (view) {
+      view.style.filter = on ? "blur(7px) saturate(0.9) brightness(0.82)" : "none";
+      view.style.pointerEvents = "none";
+    }
+    if (hud) {
+      hud.style.pointerEvents = "auto";
+      hud.style.zIndex = "2";
+    }
   }
 
   // ---------------- movement / AI ----------------
@@ -1185,12 +1270,16 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     haptic(8);
   }
 
-  function giveBall(p) {
+  function giveBall(p, opts) {
     const b = state.ball;
     b.attached = p; b.state = "held"; b.z = 1.1; b.vx = b.vy = b.vz = 0;
     for (const o of state.players) o.hasBall = false;
     p.hasBall = true;
-    state.controlled = p;
+    const keep = opts && opts.keepControl;
+    if (!keep) {
+      if (isUserOffense()) state.controlled = p;
+      else if (p && p.team === "home") state.controlled = p;
+    }
   }
 
   function tryCatch() {
@@ -1209,28 +1298,31 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       if (d < reach && d < bestD) { bestD = d; best = p; }
     }
     if (!best) return;
-    if (best.team === "home" && (best.role === "WR" || best.role === "TE" || best.role === "RB" || best.role === "QB")) {
+    const offSkill = best.team === offTeam() && (best.role === "WR" || best.role === "TE" || best.role === "RB" || best.role === "QB");
+    if (offSkill) {
       let defNear = null, defD = 99;
       for (const d of defense()) {
         if (d.down) continue;
         const dd = dist(d.x, d.y, b.x, b.y);
         if (dd < defD) { defD = dd; defNear = d; }
       }
-      const tight = defNear && defD < bestD + 0.45 && defD < 1.6;
-      const picked = tight && (defD < bestD - 0.15 || (defD <= bestD + 0.2 && Math.random() < 0.45));
+      const swatBonus = (state.userSwat > 0 && defNear === state.controlled) ? 0.7 : 0;
+      const tight = defNear && defD < bestD + 0.45 + swatBonus && defD < (1.6 + swatBonus);
+      const picked = tight && (defD < bestD - 0.15 || (defD <= bestD + 0.2 && Math.random() < 0.45) || swatBonus && defD < 2.4);
       if (picked) { interceptBall(defNear); return; }
-      giveBall(best);
+      giveBall(best, isUserOffense() ? null : { keepControl: true });
       state.phase = "run";
       state.catchSpotY = best.y;
-      state.yardsThisPlay = Math.max(0, best.y - state.los);
+      state.yardsThisPlay = Math.max(0, yardsGained(best.y));
       state.stats.comp++;
       sfx("catch");
       haptic([10, 30, 20]);
-      addBanner("Great!", "", "#ffe027", 1.15);
+      addBanner(isUserOffense() ? "Great!" : "Caught", "", isUserOffense() ? "#ffe027" : "#ffb45a", 1.15);
       spawnParticles(best.x, best.y, "#7CFF5A", 36, 11, 1.0);
       spawnParticles(best.x, best.y, "#ffe027", 16, 8, 0.8);
-      setMsg(state.gameMode === "downs" ? "Pick up the first down!" : "Cross the Quota line!", 2.2);
-    } else if (best.team === "away") {
+      if (isUserOffense()) setMsg(state.gameMode === "downs" ? "Pick up the first down!" : "Cross the Quota line!", 2.2);
+      else setMsg("Make the tackle!", 2.0);
+    } else if (best.team === defTeam()) {
       interceptBall(best);
     }
   }
@@ -1246,15 +1338,15 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     sfx("incomplete");
     sfx("whistle");
     haptic([40, 40, 80]);
-    addBanner("Intercepted!", "", "#ff6b4a", 1.6);
-    spawnParticles(d.x, d.y, "#ff6b4a", 28, 9, 0.9);
+    const userPick = d.team === "home";
+    addBanner(userPick ? "Picked off!" : "Intercepted!", "", userPick ? "#7CFF5A" : "#ff6b4a", 1.6);
+    spawnParticles(d.x, d.y, userPick ? "#7CFF5A" : "#ff6b4a", 28, 9, 0.9);
     state.result = "int";
     state.resultT = 0;
+    state.pendingSpotY = d.y;
+    state.pendingSpotX = d.x;
     saveBest();
     state.mode = "reset";
-    if (state.gameMode === "downs") {
-      /* game over after the reset beat, see update() */
-    }
   }
 
   function incompletePlay() {
@@ -1279,19 +1371,26 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (state.mode !== "live") return;
     const c = carrier();
     const spot = spotY == null ? (c ? c.y : state.los) : spotY;
-    const gained = spot - state.los;
+    const gained = yardsGained(spot);
     state.yardsThisPlay = gained;
     state.stats.yards += gained;
     state.phase = "dead";
+    if (kind === "td" && state.gameMode === "drill") {
+      resolveDrill(spot, gained, "td");
+      return;
+    }
     if (kind === "td") {
       state.mode = "celebrate";
       state.result = "td";
       state.resultT = 0;
       state.stats.tds++;
-      const bonus = state.gameMode === "downs" ? 7 : (1500 + state.quota * 40);
-      addScore(bonus);
+      if (state.possession === "home") state.homeScore += 7;
+      else state.awayScore += 7;
+      const bonus = state.gameMode === "downs" ? 7 : state.gameMode === "drill" ? 0 : (1500 + state.quota * 40);
+      if (isUserOffense() || state.gameMode === "downs") addScore(bonus);
       if (c) { c.animState = "celebrate"; c.animT = 0; c.vx = 0; c.vy = 0; }
-      addBanner("Touch Down!", state.gameMode === "downs" ? "+7" : ("+" + bonus + " pt"), "#ffe027", 2.2);
+      const tdLabel = !isUserOffense() && state.gameMode === "downs" ? "They score!" : "Touch Down!";
+      addBanner(tdLabel, state.gameMode === "downs" ? "+7" : ("+" + bonus + " pt"), "#ffe027", 2.2);
       sfx("td");
       sfx("cheer");
       haptic([20, 40, 20, 40, 80]);
@@ -1308,6 +1407,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       sfx("whistle");
       if (state.gameMode === "downs") {
         resolveDownsTick(spot, gained, isSack ? "sack" : "tackle", spotX);
+      } else if (state.gameMode === "drill") {
+        resolveDrill(spot, gained, isSack ? "sack" : "tackle", spotX);
       } else if (gained + 0.15 >= (state.quota || 0) || state.quotaMet) {
         state.mode = "reset";
         state.result = "success";
@@ -1323,13 +1424,14 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
 
   function resolveDownsTick(spot, gained, kind, spotX) {
-    const newLos = clamp(spot, 0.8, AWAY_GL);
-    if (kind !== "incomplete" && newLos >= state.firstDownY - 0.25) {
+    const dir = odir();
+    const newLos = clamp(spot, 0.8, FIELD_END - 0.8);
+    if (kind !== "incomplete" && (newLos - state.firstDownY) * dir >= -0.25) {
       state.los = newLos;
       state.ballX = clamp(spotX || state.ballX, 8, FIELD_W - 8);
       state.down = 1;
-      state.distance = Math.min(10, AWAY_GL - state.los);
-      state.firstDownY = Math.min(AWAY_GL, state.los + state.distance);
+      state.distance = Math.min(10, Math.abs(goalY() - state.los));
+      state.firstDownY = clamp(state.los + dir * state.distance, HOME_GL, AWAY_GL);
       addBanner("First Down!", "+" + Math.max(0, Math.round(gained)) + " yards", "#7CFF5A", 1.4);
       sfx("chime");
       state.mode = "reset";
@@ -1342,9 +1444,11 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       state.ballX = clamp(spotX || state.ballX, 8, FIELD_W - 8);
     }
     state.down++;
-    state.distance = Math.max(0.5, state.firstDownY - state.los);
+    state.distance = Math.max(0.5, (state.firstDownY - state.los) * dir);
     if (state.down > 4) {
       addBanner("Turnover on downs", "", "#ff6b4a", 1.6);
+      state.pendingSpotY = state.los;
+      state.pendingSpotX = state.ballX;
       saveBest();
       state.mode = "reset";
       state.result = "turnover";
@@ -1358,9 +1462,216 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     }
   }
 
+  function resolveDrill(spot, gained, kind) {
+    if (crossedLine(spot, state.firstDownY) || kind === "td") {
+      addBanner("They broke through!", "", "#ff6b4a", 1.6);
+      saveBest();
+      state.mode = "reset";
+      state.result = "fail";
+      state.resultT = 0;
+      return;
+    }
+    const pts = 200 + Math.max(0, Math.round((state.distance - Math.max(0, gained)) * 20));
+    addScore(pts);
+    addBanner("Stopped!", "+" + pts + " pt", "#7CFF5A", 1.4);
+    sfx("chime");
+    state.mode = "reset";
+    state.result = "success";
+    state.resultT = 0;
+  }
+
+  function changePossession(reason, spotY, spotX) {
+    const from = state.possession === "away" ? "away" : "home";
+    const to = from === "home" ? "away" : "home";
+    const oldDir = from === "home" ? 1 : -1;
+    if (reason === "td") {
+      /* scores already applied in finishPlay */
+    }
+    state.possession = to;
+    state.offDir = to === "home" ? 1 : -1;
+    state.down = 1;
+    state.distance = 10;
+    state.scrambling = false;
+    state.aiming = false;
+    if (reason === "td") {
+      state.los = to === "home" ? 25 : 95;
+      state.ballX = FIELD_W * 0.5 + rand(-3, 3);
+    } else if (reason === "punt") {
+      const kick = 36 + rand(-3, 6);
+      state.los = clamp((spotY != null ? spotY : state.los) + oldDir * kick, 15, 105);
+      state.ballX = FIELD_W * 0.5 + rand(-4, 4);
+    } else {
+      state.los = clamp(spotY != null ? spotY : (state.pendingSpotY != null ? state.pendingSpotY : state.los), 12, 108);
+      state.ballX = clamp(spotX != null ? spotX : (state.pendingSpotX != null ? state.pendingSpotX : state.ballX), 8, FIELD_W - 8);
+    }
+    state.firstDownY = clamp(state.los + state.offDir * 10, HOME_GL, AWAY_GL);
+    state.distance = Math.max(1, Math.abs(state.firstDownY - state.los));
+    state.pendingSpotY = state.pendingSpotX = null;
+    addBanner(to === "home" ? "Your ball" : "Defense!", downLabel(1) + " & " + distLabel(), to === "home" ? "#7CFF5A" : "#5ad7ff", 1.5);
+    setupPlay();
+  }
+
+  function applyDefCall(id) {
+    const call = DEF_CALLS.find((c) => c.id === id) || DEF_CALLS[1];
+    state.defCall = call.id;
+    state.coverScheme = call.id;
+    const dir = odir();
+    const los = state.los;
+    const bx = clamp(state.ballX, 16, FIELD_W - 16);
+    const rec = state._recv || {};
+    const wrx = rec.WRX, wrz = rec.WRZ, slot = rec.WR3, te = rec.TE;
+    const defs = defense();
+    const cbs = defs.filter((p) => p.role === "CB");
+    const lbs = defs.filter((p) => p.role === "LB");
+    const safeties = defs.filter((p) => p.role === "S");
+    const line = defs.filter((p) => p.role === "DL" || p.rush);
+    const sfty = safeties[0];
+    const lb1 = lbs[0], lb2 = lbs[1];
+    const cbx = cbs[0], cbz = cbs[1];
+    for (const d of defs) { d.cover = null; d.zone = null; d.rush = !!(d.role === "DL"); }
+    for (const r of line) r.rush = true;
+    if (call.id === "manblitz") {
+      if (cbx && wrx) cbx.cover = wrx;
+      if (cbz && wrz) cbz.cover = wrz;
+      if (lb1) { lb1.rush = true; lb1.cover = slot || te; }
+      if (lb2) { lb2.cover = te || slot; }
+      if (sfty) sfty.zone = { x: bx, y: los + dir * 16 };
+    } else if (call.id === "cover2") {
+      if (cbx) cbx.zone = { x: wrx ? wrx.x : bx - 18, y: los + dir * 8 };
+      if (cbz) cbz.zone = { x: wrz ? wrz.x : bx + 18, y: los + dir * 8 };
+      if (lb1) lb1.zone = { x: bx - 7, y: los + dir * 9 };
+      if (lb2) lb2.zone = { x: bx + 8, y: los + dir * 16 };
+      if (sfty) sfty.zone = { x: bx - 8, y: los + dir * 18 };
+    } else if (call.id === "cover3") {
+      if (cbx) cbx.zone = { x: wrx ? wrx.x : bx - 16, y: los + dir * 16 };
+      if (cbz) cbz.zone = { x: wrz ? wrz.x : bx + 16, y: los + dir * 16 };
+      if (sfty) sfty.zone = { x: bx, y: los + dir * 18 };
+      if (lb1) lb1.zone = { x: bx - 8, y: los + dir * 8 };
+      if (lb2) lb2.zone = { x: bx + 8, y: los + dir * 8 };
+    } else {
+      // prevent
+      if (cbx) cbx.zone = { x: wrx ? wrx.x : bx - 16, y: los + dir * 20 };
+      if (cbz) cbz.zone = { x: wrz ? wrz.x : bx + 16, y: los + dir * 20 };
+      if (sfty) sfty.zone = { x: bx, y: los + dir * 22 };
+      if (lb1) lb1.zone = { x: bx - 8, y: los + dir * 14 };
+      if (lb2) lb2.zone = { x: bx + 8, y: los + dir * 14 };
+      for (const r of line) r.rush = false;
+    }
+  }
+
+  function pickAIPlay() {
+    if (state.gameMode === "drill") return { kind: "run", play: playById("go") };
+    const roll = Math.random();
+    const long = state.distance >= 8;
+    const short = state.distance <= 3;
+    if (state.defCall === "prevent" || (long && roll < 0.7)) return { kind: "pass", play: playById(roll < 0.35 ? "go" : "post") };
+    if (short && roll < 0.55) return { kind: "run", play: playById("curl") };
+    if (roll < 0.4) return { kind: "run", play: playById("slants") };
+    return { kind: "pass", play: playById(roll < 0.7 ? "slants" : "curl") };
+  }
+
+  function callDefense(id) {
+    applyDefCall(id || state.defCall || "cover2");
+    const plan = pickAIPlay();
+    state.aiPlan = plan;
+    applyPlayRoutes(plan.play);
+    state.mode = "live";
+    state.phase = plan.kind === "run" ? "pass" : "pass";
+    state.playTime = 0;
+    state.aiming = false;
+    state.scrambling = false;
+    state.aiThrowAt = plan.kind === "pass" ? (1.7 + Math.random() * 1.3) : 0;
+    if (plan.kind === "run") state.aiThrowAt = 0;
+    sfx("whistle");
+    haptic(12);
+    setMsg(state.gameMode === "drill" ? "Stop the runner!" : "Stop the offense!", 2.0);
+  }
+
+  function switchDefender() {
+    if (isUserOffense()) return false;
+    const ball = state.ball;
+    const bx = ball ? ball.x : FIELD_W / 2, by = ball ? ball.y : state.los;
+    let best = null, bestD = 1e9;
+    for (const d of defense()) {
+      if (d.down || d === state.controlled) continue;
+      const dd = dist(d.x, d.y, bx, by);
+      if (dd < bestD) { bestD = dd; best = d; }
+    }
+    if (best) { state.controlled = best; sfx("ui"); return true; }
+    return false;
+  }
+
+  function diveTackle() {
+    if (isUserOffense()) return;
+    const d = state.controlled;
+    if (!d || d.down || state.mode !== "live") return;
+    d.diving = true;
+    d.animState = "dive";
+    d.animT = 0;
+    state.userDive = 0.7;
+    const c = carrier() || (state.ball && state.ball.state === "air" ? { x: state.ball.x, y: state.ball.y } : null);
+    if (c) {
+      const ang = angTo(d.x, d.y, c.x, c.y);
+      d.vx = Math.cos(ang) * (d.speed * 1.7);
+      d.vy = Math.sin(ang) * (d.speed * 1.7);
+    }
+    sfx("whoosh");
+    haptic(12);
+  }
+
+  function swatPass() {
+    if (isUserOffense() || state.mode !== "live") return;
+    const d = state.controlled;
+    if (!d || d.down) return;
+    d.animState = "jump";
+    d.animT = 0;
+    state.userSwat = 0.55;
+    sfx("click");
+    haptic(8);
+    const b = state.ball;
+    if (!b || b.state !== "air") return;
+    const dd = dist(d.x, d.y, b.x, b.y);
+    if (dd < 2.9 && b.z < 4.4) {
+      if (dd < 1.65 && b.z < 3.3) interceptBall(d);
+      else {
+        addBanner("Pass broken!", "", "#5ad7ff", 1.3);
+        incompletePlay();
+      }
+    }
+  }
+
+  function beginDefense(opts) {
+    opts = opts || {};
+    state.gameMode = opts.gameMode || "downs";
+    if (!state.team) state.team = TEAMS[1];
+    if (!state.foe) state.foe = pickOpponent(state.team);
+    state.possession = "away";
+    state.offDir = -1;
+    state.los = opts.los != null ? opts.los : 75;
+    state.down = opts.down || 1;
+    state.distance = opts.distance || 10;
+    state.firstDownY = state.los + state.offDir * state.distance;
+    state.ballX = opts.ballX != null ? opts.ballX : FIELD_W * 0.5;
+    state.clock = state.clock > 0 ? state.clock : 120;
+    state.autoSnap = !!opts.autoSnap;
+    setViewBlur(false);
+    refreshFieldArt();
+    setupPlay();
+    if (state.mode === "defcall") callDefense(opts.call || "cover2");
+    if (opts.run) {
+      const rb = offense().find((p) => p.role === "RB") || carrier();
+      if (rb && state.ball) {
+        giveBall(rb, { keepControl: true });
+        state.phase = "run";
+        state.aiPlan = { kind: "run" };
+      }
+    }
+    return { mode: state.mode, phase: state.phase, possession: state.possession };
+  }
+
   function downLabel(d) { return d === 1 ? "1st" : d === 2 ? "2nd" : d === 3 ? "3rd" : "4th"; }
   function distLabel() {
-    if (state.firstDownY >= AWAY_GL - 0.2) return "Goal";
+    if (Math.abs(state.firstDownY - goalY()) <= 0.25) return "Goal";
     return String(Math.max(1, Math.round(state.distance)));
   }
 
@@ -1509,6 +1820,88 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     }
   }
 
+  function clampQBPocket(qb) {
+    if (!qb) return;
+    const px = qb.snapX, py = qb.snapY;
+    const dir = odir();
+    qb.x = clamp(qb.x, px - 4.3, px + 4.3);
+    if (dir > 0) qb.y = clamp(qb.y, py - 1.6, Math.min(py + 0.8, state.los - 3.1));
+    else qb.y = clamp(qb.y, Math.max(py - 0.8, state.los + 3.1), py + 1.6);
+  }
+
+  function mostOpenReceiver() {
+    let best = null, bestScore = -1e9;
+    for (const r of receivers()) {
+      if (r.down) continue;
+      let defD = 99;
+      for (const d of defense()) {
+        if (d.down) continue;
+        const dd = dist(d.x, d.y, r.x, r.y);
+        if (dd < defD) defD = dd;
+      }
+      const downfield = yardsGained(r.y);
+      const score = defD * 2.2 + downfield * 0.15;
+      if (score > bestScore) { bestScore = score; best = r; }
+    }
+    return best;
+  }
+
+  function updateAIQuarterback(dt, qb) {
+    if (!qb || qb.down) return;
+    const plan = state.aiPlan || { kind: "pass" };
+    const dir = odir();
+    if (plan.kind === "run") {
+      // brief drop, then hand off
+      steerPlayer(qb, 0, 0, dt, 0.4);
+      clampQBPocket(qb);
+      qb.animState = "hold";
+      if (state.playTime > 0.28) {
+        const rb = offense().find((p) => p.role === "RB" && !p.down);
+        if (rb && state.ball && state.ball.attached === qb) {
+          giveBall(rb, { keepControl: true });
+          rb.animState = "run";
+          state.phase = "run";
+        } else {
+          // no RB — QB keeps it and runs
+          state.scrambling = true;
+          state.phase = "run";
+        }
+      }
+      return;
+    }
+    // Pass play: sit in the pocket, then throw or scramble
+    const pressured = state.playTime >= (state.defCall === "manblitz" ? 2.2 : POCKET_SAFE) &&
+      defense().some((d) => !d.down && dist(d.x, d.y, qb.x, qb.y) < 3.2);
+    if (!state.scrambling) {
+      steerPlayer(qb, 0, dir * -0.15, dt, 0.2);
+      clampQBPocket(qb);
+      qb.animState = "hold";
+      const open = mostOpenReceiver();
+      if (open) {
+        state.targetRecv = open;
+        state.aimAngle = angTo(qb.x, qb.y, open.x, open.y);
+      }
+      if (pressured && state.playTime > 2.0) {
+        state.scrambling = true;
+      } else if (state.aiThrowAt && state.playTime >= state.aiThrowAt && open) {
+        throwBall();
+        return;
+      }
+    } else {
+      const sideline = qb.x < FIELD_W / 2 ? 3 : FIELD_W - 3;
+      moveToward(qb, sideline, qb.y + dir * 12, qb.speed * 0.95);
+      qb.animState = "run";
+      // late throw if someone comes open
+      if (state.playTime > (state.aiThrowAt || 2) + 0.8 && Math.random() < dt * 0.8) {
+        const open = mostOpenReceiver();
+        if (open && dist(open.x, open.y, qb.x, qb.y) > 6) {
+          state.targetRecv = open;
+          throwBall();
+        }
+      }
+    }
+  }
+
   function updateLive(dt) {
     state.playTime += dt;
     const axis = getMoveAxis();
@@ -1517,44 +1910,61 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (Math.abs(nx - input.prevNx) > 0.45 && Math.abs(nx) > 0.5) input.flick = nx > 0 ? 1 : -1;
     input.prevNx = nx;
 
+    // User-controlled defender (Downs defense + Defense Drill)
+    if (!isUserOffense() && state.controlled && !state.controlled.down) {
+      const u = state.controlled;
+      if (!u.diving || state.userDive > 0) {
+        if (state.userDive <= 0 && state.userSwat <= 0) {
+          const mag = Math.hypot(axis.x, axis.y);
+          if (mag > 0.08) steerPlayer(u, axis.x, axis.y, dt, 1.08);
+          else steerPlayer(u, 0, 0, dt, 0.5);
+          u.animState = Math.hypot(u.vx, u.vy) > 0.5 ? "run" : "idle";
+        }
+      }
+    }
+    if (state.userDive > 0) state.userDive = Math.max(0, state.userDive - dt);
+    if (state.userSwat > 0) state.userSwat = Math.max(0, state.userSwat - dt);
+
     if (state.phase === "pass") {
       const qb = carrier();
       if (qb && qb.role === "QB") {
-        const mag = Math.hypot(axis.x, axis.y);
-        const stickMag = Math.hypot(axis.sx, axis.sy);
-        if (state.scrambling) {
-          // RUN mode: joystick moves the QB camera-relative (can leave the pocket)
-          if (mag > 0.08) steerPlayer(qb, axis.x, axis.y, dt, 1);
-          else steerPlayer(qb, 0, 0, dt, 0.5);
-          if (qb.animState !== "throw") qb.animState = Math.hypot(qb.vx, qb.vy) > 0.5 ? "run" : "hold";
-        } else {
-          // Pocket: stick aims (camera-relative). QB stays put or slides only laterally, slowly.
-          // Holding the stick downfield must NOT run the QB past the line.
-          if (stickMag > 0.08) {
-            const { rx, ry } = cameraFlatAxes();
-            const lat = axis.sx;
-            steerPlayer(qb, rx * lat, ry * lat, dt, 0.28);
-            state.aiming = true;
-            state.aimAngle = Math.atan2(axis.y, axis.x);
-            state.targetRecv = snappedReceiver();
-          } else if (input.mouse.down && !input.joy.active) {
-            const w = screenToWorld(input.mouse.x, input.mouse.y);
-            state.aimAngle = angTo(qb.x, qb.y, w.x, w.y);
-            state.aiming = true;
-            state.targetRecv = snappedReceiver();
-            steerPlayer(qb, 0, 0, dt, 0.5);
+        if (isUserOffense()) {
+          const mag = Math.hypot(axis.x, axis.y);
+          const stickMag = Math.hypot(axis.sx, axis.sy);
+          if (state.scrambling) {
+            // RUN mode: joystick moves the QB camera-relative (can leave the pocket)
+            if (mag > 0.08) steerPlayer(qb, axis.x, axis.y, dt, 1);
+            else steerPlayer(qb, 0, 0, dt, 0.5);
+            if (qb.animState !== "throw") qb.animState = Math.hypot(qb.vx, qb.vy) > 0.5 ? "run" : "hold";
           } else {
-            steerPlayer(qb, 0, 0, dt, 0.5);
+            // Pocket: stick aims (camera-relative). QB stays put or slides only laterally, slowly.
+            // Holding the stick downfield must NOT run the QB past the line.
+            if (stickMag > 0.08) {
+              const { rx, ry } = cameraFlatAxes();
+              const lat = axis.sx;
+              steerPlayer(qb, rx * lat, ry * lat, dt, 0.28);
+              state.aiming = true;
+              state.aimAngle = Math.atan2(axis.y, axis.x);
+              state.targetRecv = snappedReceiver();
+            } else if (input.mouse.down && !input.joy.active) {
+              const w = screenToWorld(input.mouse.x, input.mouse.y);
+              state.aimAngle = angTo(qb.x, qb.y, w.x, w.y);
+              state.aiming = true;
+              state.targetRecv = snappedReceiver();
+              steerPlayer(qb, 0, 0, dt, 0.5);
+            } else {
+              steerPlayer(qb, 0, 0, dt, 0.5);
+            }
+            clampQBPocket(qb);
+            if (qb.animState !== "throw") qb.animState = "hold";
           }
-          const px = qb.snapX, py = qb.snapY;
-          qb.x = clamp(qb.x, px - 4.3, px + 4.3);
-          qb.y = clamp(qb.y, py - 1.6, Math.min(py + 0.8, state.los - 3.1));
-          if (qb.animState !== "throw") qb.animState = "hold";
+        } else {
+          updateAIQuarterback(dt, qb);
         }
       }
     } else if (state.phase === "run") {
       const c = carrier();
-      if (c && c.team === "home" && !c.down) {
+      if (c && c.team === "home" && !c.down && isUserOffense()) {
         // Auto-run downfield (camera forward) plus full camera-relative stick:
         // stick up = downfield/away from camera, stick right = screen-right.
         const { fx, fy } = cameraFlatAxes();
@@ -1565,16 +1975,25 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         else { mx = fx; my = fy; }
         steerPlayer(c, mx, my, dt, 1);
         // yards & score tick
-        const yds = Math.max(0, c.y - state.los);
+        const yds = Math.max(0, yardsGained(c.y));
         if (yds > state.yardsThisPlay) {
           const dy = yds - state.yardsThisPlay;
           addScore(dy * 28);
           state.yardsThisPlay = yds;
         }
-        if (!state.quotaMet && c.y >= state.firstDownY - 0.2) {
+        if (!state.quotaMet && crossedLine(c.y, state.firstDownY - 0.2 * odir())) {
           state.quotaMet = true;
           sfx("chime");
           setMsg("", 0);
+        }
+      } else if (c && !c.down && !isUserOffense()) {
+        const dir = odir();
+        const hole = (c.snapX || c.x) + Math.sin((state.playTime || 0) * 1.2) * 2.2;
+        moveToward(c, clamp(hole, 3, FIELD_W - 3), c.y + dir * 18, c.speed * 0.98);
+        c.animState = "run";
+        state.yardsThisPlay = Math.max(state.yardsThisPlay, yardsGained(c.y));
+        if (state.gameMode === "drill" && crossedLine(c.y, state.firstDownY)) {
+          finishPlay("tackle", c.y, c.x); // resolveDrill treats a crossed line as a fail
         }
       }
     }
@@ -1587,6 +2006,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     for (const p of offense()) {
       if (p.diving || p.down) continue;
       if (p.role === "OL") continue;
+      if (p.role === "QB" && (p.hasBall || state.phase === "pass" || state.phase === "flight")) continue;
       if (p === state.controlled && (state.phase === "pass" || state.phase === "run") && (p.hasBall || (state.phase === "pass" && p.role === "QB"))) continue;
       if (passing && (p.role === "WR" || p.role === "TE" || p.role === "RB") && !p.hasBall) {
         const toBall = dist(p.x, p.y, ball.x, ball.y);
@@ -1600,8 +2020,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       if (p.animState !== "helm" && p.animState !== "celebrate") p.animState = (Math.hypot(p.vx, p.vy) > 0.5 ? "run" : "idle");
     }
     for (const d of defense()) {
+      if (d === state.controlled && !isUserOffense()) continue;
       if (d.diving) {
-        d.x += d.vx * dt; d.y += d.vy * dt;
         d.vx *= 0.96; d.vy *= 0.96;
         d.animT += dt;
         continue;
@@ -1614,7 +2034,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         const tx = ball.x + ball.vx * 0.28, ty = ball.y + ball.vy * 0.28;
         const toBall = dist(d.x, d.y, tx, ty);
         if (toBall < 11 && ball.z < 5.5) moveToward(d, tx, ty, d.speed * 1.02);
-        else if (d.cover) moveToward(d, d.cover.x + 0.4, d.cover.y + 0.9, d.speed * 0.96);
+        else if (d.cover) moveToward(d, d.cover.x + 0.4, d.cover.y + odir() * 0.9, d.speed * 0.96);
         else if (d.zone) moveToward(d, d.zone.x, d.zone.y, d.speed * 0.75);
       } else if (openField) {
         pursueCarrier(d, carr);
@@ -1624,7 +2044,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         // LBs start to spy / crash once the QB tucks, but pocket clamp still holds until POCKET_SAFE
         pursueCarrier(d, carr, 0.95);
       } else if (d.cover) {
-        moveToward(d, d.cover.x + 0.45, d.cover.y + 1.0, d.speed * 0.94);
+        moveToward(d, d.cover.x + 0.45, d.cover.y + odir() * 1.0, d.speed * 0.94);
       } else if (d.zone) {
         moveToward(d, d.zone.x, d.zone.y, d.speed * 0.72);
       }
@@ -1682,7 +2102,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       b.airTime += dt;
       b.x += b.vx * dt; b.y += b.vy * dt; b.z += b.vz * dt; b.vz -= 20 * dt;
       // floating points while in the air
-      if (Math.floor((b.airTime - dt) * 5) !== Math.floor(b.airTime * 5)) {
+      if (isUserOffense() && state.gameMode === "quota" && Math.floor((b.airTime - dt) * 5) !== Math.floor(b.airTime * 5)) {
         const pts = 80 + Math.round(Math.random() * 180);
         addScore(pts);
         const colors = ["#ffe027", "#7CFF5A", "#5ad7ff", "#ff9a3c", "#fff"];
@@ -1784,7 +2204,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       if (state.juke) state.juke = null;
       return;
     }
-    if (c.y >= AWAY_GL) { finishPlay("td", AWAY_GL, c.x); return; }
+    if (crossedGoal(c.y)) { finishPlay("td", goalY(), c.x); return; }
     if (state.phase === "run" && (c.x <= 0.15 || c.x >= FIELD_W - 0.15)) {
       finishPlay("tackle", c.y, clamp(c.x, 0.6, FIELD_W - 0.6));
       return;
@@ -1801,7 +2221,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
     const near = [];
     for (const d of defense()) {
-      if (d.down || d.diving) continue;
+      if (d.down) continue;
+      if (d.diving && !(d === state.controlled && state.userDive > 0)) continue;
       const dd = dist(d.x, d.y, c.x, c.y);
       if (dd < 5) near.push({ d, dd });
     }
@@ -1847,7 +2268,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     }
 
     // Fair juke chance against a SINGLE closing defender
-    if (!state.juke && closing.length === 1 && inWrap.length === 0 && (state.playTime - (state.lastJukeT || 0) > 0.85)) {
+    if (isUserOffense() && !state.juke && closing.length === 1 && inWrap.length === 0 && (state.playTime - (state.lastJukeT || 0) > 0.85)) {
       startJuke(closing[0].d);
     }
   }
@@ -1883,7 +2304,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     updateParticles(dt);
     updateCamera(dt);
     updateExtras(dt);
-    if (state.mode === "title" || state.mode === "teams" || state.mode === "settings" || state.mode === "credits" || state.mode === "playcall") {
+    if (state.mode === "title" || state.mode === "teams" || state.mode === "settings" || state.mode === "credits" || state.mode === "playcall" || state.mode === "defcall") {
       state.introT += dt;
       return;
     }
@@ -1909,10 +2330,26 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       state.resultT += dt;
       const wait = state.result === "incomplete" ? 1.2 : 1.45;
       if (state.resultT > wait) {
-        if (state.result === "fail" || state.result === "turnover" || state.result === "clock" ||
-            (state.result === "int" && state.gameMode === "downs")) {
+        if (state.result === "clock" || (state.gameMode !== "downs" && (state.result === "fail" || (state.result === "int" && state.gameMode === "quota")))) {
+          if (state.gameMode === "quota" && state.result === "int") {
+            setupPlay();
+            return;
+          }
           state.mode = "gameover";
           setViewBlur(true);
+          return;
+        }
+        if (state.gameMode === "drill" && state.result === "fail") {
+          state.mode = "gameover";
+          setViewBlur(true);
+          return;
+        }
+        if (state.gameMode === "downs" && (state.result === "turnover" || state.result === "int" || state.result === "punt")) {
+          changePossession(state.result === "punt" ? "punt" : state.result, state.pendingSpotY, state.pendingSpotX);
+          return;
+        }
+        if (state.gameMode === "drill" && state.result === "success") {
+          nextPlay();
           return;
         }
         setupPlay();
@@ -2633,7 +3070,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       }
       playAssetAnim(p);
       if (m.mixer) m.mixer.update(state.frameDt || 0.016);
-      m.ring.visible = state.controlled === p && state.mode === "live" && state.phase === "run";
+      m.ring.visible = state.controlled === p && (state.mode === "live" || state.mode === "defcall") && (!isUserOffense() || state.phase === "run");
       return;
     }
     const spd = Math.hypot(p.vx, p.vy);
@@ -2730,7 +3167,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       if (m.elL) m.elL.rotation.x = -0.35 - Math.max(0, swing) * 0.3;
       if (m.elR) m.elR.rotation.x = -0.35 - Math.max(0, -swing) * 0.3;
     }
-    m.ring.visible = state.controlled === p && state.mode === "live" && state.phase === "run";
+    m.ring.visible = state.controlled === p && (state.mode === "live" || state.mode === "defcall") && (!isUserOffense() || state.phase === "run");
   }
 
 
@@ -2874,7 +3311,21 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     let tz = state.ball ? state.ball.y : state.los;
     let ty = 1.5;
     const carr = carrier();
-    if (state.phase === "flight" && state.ball && state.ball.state === "air") {
+    const me = state.controlled;
+    if (!isUserOffense() && me) {
+      // Camera behind your defender, looking toward the offense / ball.
+      tx = me.x;
+      tz = me.y;
+      ty = 1.5;
+      if (state.phase === "flight" && state.ball && state.ball.state === "air") {
+        tx = lerp(me.x, state.ball.x, 0.35);
+        tz = lerp(me.y, state.ball.y, 0.35);
+        ty = Math.max(1.4, state.ball.z * 0.5);
+      } else if (carr) {
+        tx = lerp(me.x, carr.x, 0.2);
+        tz = lerp(me.y, carr.y, 0.2);
+      }
+    } else if (state.phase === "flight" && state.ball && state.ball.state === "air") {
       tx = state.ball.x; tz = state.ball.y; ty = Math.max(1.4, state.ball.z);
     } else if (carr) { tx = carr.x; tz = carr.y; ty = 1.5; }
 
@@ -3009,13 +3460,22 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     ctx.fillRect(px + 12, top + 10, 6, 20);
     ctx.fillRect(px + 22, top + 10, 6, 20);
 
-    // SCORE box
-    const sw = Math.min(150, W * 0.34);
+    // SCORE box — two-team board in Downs, arcade total otherwise
+    const sw = Math.min(state.gameMode === "downs" ? 180 : 150, W * 0.42);
     const sx = (W - sw) / 2;
     fillRound(sx, top, sw, 50, 10, "#f4f4f4");
-    text("SCORE", sx + sw / 2, top + 10, 9, "#222", "center", "800");
-    fillRound(sx + 8, top + 18, sw - 16, 26, 6, "#111");
-    text(pad5(state.displayScore), sx + sw / 2, top + 32, 18, "#fff", "center", "800");
+    if (state.gameMode === "downs" && state.team && state.foe) {
+      text("SCORE", sx + sw / 2, top + 10, 9, "#222", "center", "800");
+      fillRound(sx + 6, top + 18, sw - 12, 26, 6, "#111");
+      const hs = String(state.homeScore || 0), as_ = String(state.awayScore || 0);
+      text((state.team.letter || "H") + "  " + hs, sx + sw * 0.28, top + 32, 15, "#ffe027", "center", "800");
+      text("-", sx + sw / 2, top + 32, 14, "#aaa", "center", "800");
+      text(as_ + "  " + (state.foe.letter || "A"), sx + sw * 0.72, top + 32, 15, "#fff", "center", "800");
+    } else {
+      text("SCORE", sx + sw / 2, top + 10, 9, "#222", "center", "800");
+      fillRound(sx + 8, top + 18, sw - 16, 26, 6, "#111");
+      text(pad5(state.displayScore), sx + sw / 2, top + 32, 18, "#fff", "center", "800");
+    }
 
     // Quota / downs box
     const qw = 86, qh = 54;
@@ -3072,7 +3532,22 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     ctx.strokeStyle = "rgba(0,0,0,0.15)"; ctx.lineWidth = 2; ctx.stroke();
   }
 
+  function drawDefenseButtons() {
+    if (state.mode !== "live") return;
+    const r = input.joy.baseR || 60;
+    const jx = input.joy.baseX || W * 0.5;
+    const jy = input.joy.baseY || H - 80;
+    const bw = 78, bh = 70;
+    const x = Math.min(W - bw - 14, jx + r + 22);
+    const y = jy - bh / 2;
+    btn("dive", x, y - 76, bw, bh, "TACKLE", { size: 13, r: 16, bg: "#c62828", bd: "#fff", color: "#fff", weight: "900" });
+    btn("swat", x, y, bw, bh, "SWAT", { size: 13, r: 16, bg: "#1d6ad4", bd: "#fff", color: "#fff", weight: "900" });
+    const sx = Math.max(14, jx - r - 22 - bw);
+    btn("switch", sx, y, bw, bh, "SWITCH", { size: 13, r: 16, bg: "rgba(10,16,20,0.88)", bd: "#ffe027", color: "#fff", weight: "900" });
+  }
+
   function drawRunButton() {
+    if (!isUserOffense()) return;
     if (state.mode !== "live" || state.phase !== "pass") return;
     const r = input.joy.baseR || 60;
     const jx = input.joy.baseX || W * 0.5;
@@ -3092,6 +3567,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
 
   function drawStiffButton() {
+    if (!isUserOffense()) return;
     if (state.mode !== "live") return;
     if (!(state.phase === "run" || (state.phase === "pass" && state.scrambling))) return;
     const r = input.joy.baseR || 60;
@@ -3303,31 +3779,60 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   }
 
   function drawPause() {
-    ctx.fillStyle = "rgba(6,10,14,0.55)";
+    ctx.fillStyle = "rgba(6,10,14,0.58)";
     ctx.fillRect(0, 0, W, H);
-    text("PAUSED", W / 2, H * 0.32, 36, "#ffe027", "center", "900", true, 6);
-    const bw = Math.min(240, W * 0.7);
-    btn("resume", W / 2 - bw / 2, H * 0.42, bw, 48, "RESUME", { size: 18, bg: "#1d6ad4", bd: "#fff", r: 12 });
-    btn("change", W / 2 - bw / 2, H * 0.42 + 60, bw, 48, "CHANGE TEAM", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#f0c14b", r: 12 });
-    btn("mute", W / 2 - bw / 2, H * 0.42 + 120, bw, 48, state.muted ? "SOUND: OFF" : "SOUND: ON", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#fff", r: 12 });
-    btn("settings", W / 2 - bw / 2, H * 0.42 + 180, bw, 48, "SETTINGS", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#f0c14b", r: 12 });
-    btn("credits", W / 2 - bw / 2, H * 0.42 + 240, bw, 48, "CREDITS", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#fff", r: 12 });
+    text("PAUSED", W / 2, H * 0.28, 36, "#ffe027", "center", "900", true, 6);
+    const bw = Math.min(260, W * 0.74);
+    const x = W / 2 - bw / 2;
+    let y = H * 0.36;
+    const gap = 58;
+    btn("resume", x, y, bw, 50, "RESUME", { size: 18, bg: "#1d6ad4", bd: "#fff", r: 12 });
+    btn("restart", x, y + gap, bw, 50, "RESTART", { size: 16, bg: "rgba(10,16,20,0.88)", bd: "#f0c14b", r: 12 });
+    btn("settings", x, y + gap * 2, bw, 50, "SETTINGS", { size: 16, bg: "rgba(10,16,20,0.88)", bd: "#fff", r: 12 });
+    btn("quit", x, y + gap * 3, bw, 50, "QUIT TO MENU", { size: 16, bg: "#8b1e1e", bd: "#fff", r: 12 });
+  }
+
+  function drawLeaveConfirm() {
+    ctx.fillStyle = "rgba(4,8,14,0.72)";
+    ctx.fillRect(0, 0, W, H);
+    fillRound(W * 0.1, H * 0.32, W * 0.8, 220, 16, "rgba(10,16,24,0.95)");
+    ctx.strokeStyle = "#f0c14b"; ctx.lineWidth = 2; strokeRound(W * 0.1, H * 0.32, W * 0.8, 220, 16);
+    text("Leave game?", W / 2, H * 0.32 + 50, 26, "#ffe027", "center", "900", true);
+    text("You'll return to the main menu.", W / 2, H * 0.32 + 88, 13, "rgba(255,255,255,0.8)", "center", "700");
+    const bw = Math.min(120, W * 0.32);
+    btn("leave-yes", W / 2 - bw - 10, H * 0.32 + 130, bw, 50, "YES", { size: 18, bg: "#8b1e1e", bd: "#fff", r: 12 });
+    btn("leave-no", W / 2 + 10, H * 0.32 + 130, bw, 50, "NO", { size: 18, bg: "#1d6ad4", bd: "#fff", r: 12 });
   }
 
   function drawGameOver() {
     ctx.fillStyle = "rgba(6,10,14,0.62)";
     ctx.fillRect(0, 0, W, H);
-    text("GAME OVER", W / 2, H * 0.24, 36, "#ffe027", "center", "900", true, 7);
-    text("Quota missed", W / 2, H * 0.30, 16, "rgba(255,255,255,0.75)", "center", "700");
-    fillRound(W / 2 - 90, H * 0.36, 180, 70, 12, "rgba(0,0,0,0.6)");
-    text("SCORE", W / 2, H * 0.38 + 12, 11, "#ccc", "center", "800");
-    text(pad5(state.score), W / 2, H * 0.38 + 38, 28, "#fff", "center", "900");
-    text("BEST  " + pad5(state.best), W / 2, H * 0.48, 16, "#f0c14b", "center", "800");
-    const st = state.stats || {};
-    const line = Math.round(st.yards || 0) + " yds   " + (st.tds || 0) + " TD   " + completionPct() + "%  " + (st.att || 0) + " att";
-    text(line, W / 2, H * 0.535, 13, "rgba(255,255,255,0.85)", "center", "700");
-    const reason = state.result === "int" ? "Intercepted" : state.result === "turnover" ? "Turnover on downs" : state.result === "clock" ? "Time expired" : "Drive over";
-    text(reason, W / 2, H * 0.325, 13, "rgba(255,180,140,0.9)", "center", "700");
+    text("GAME OVER", W / 2, H * 0.22, 36, "#ffe027", "center", "900", true, 7);
+    if (state.gameMode === "downs" && state.team && state.foe) {
+      const hs = state.homeScore || 0, as_ = state.awayScore || 0;
+      text(hs === as_ ? "It's a tie" : (hs > as_ ? "You win!" : "They win"), W / 2, H * 0.28, 16, "rgba(255,255,255,0.8)", "center", "700");
+      fillRound(W / 2 - 110, H * 0.32, 220, 80, 12, "rgba(0,0,0,0.6)");
+      text((state.team.short || "You") + "  " + hs + "   -   " + as_ + "  " + (state.foe.short || "Foe"), W / 2, H * 0.32 + 40, 18, "#fff", "center", "800");
+      const reason = state.result === "clock" ? "Final — time expired" : "Final";
+      text(reason, W / 2, H * 0.48, 13, "rgba(255,180,140,0.9)", "center", "700");
+    } else if (state.gameMode === "drill") {
+      text("The runner crossed the line", W / 2, H * 0.29, 15, "rgba(255,255,255,0.8)", "center", "700");
+      fillRound(W / 2 - 90, H * 0.34, 180, 70, 12, "rgba(0,0,0,0.6)");
+      text("SCORE", W / 2, H * 0.36 + 12, 11, "#ccc", "center", "800");
+      text(pad5(state.score), W / 2, H * 0.36 + 38, 28, "#fff", "center", "900");
+      text("BEST  " + pad5(state.best), W / 2, H * 0.48, 16, "#f0c14b", "center", "800");
+    } else {
+      text("Quota missed", W / 2, H * 0.30, 16, "rgba(255,255,255,0.75)", "center", "700");
+      fillRound(W / 2 - 90, H * 0.36, 180, 70, 12, "rgba(0,0,0,0.6)");
+      text("SCORE", W / 2, H * 0.38 + 12, 11, "#ccc", "center", "800");
+      text(pad5(state.score), W / 2, H * 0.38 + 38, 28, "#fff", "center", "900");
+      text("BEST  " + pad5(state.best), W / 2, H * 0.48, 16, "#f0c14b", "center", "800");
+      const st = state.stats || {};
+      const line = Math.round(st.yards || 0) + " yds   " + (st.tds || 0) + " TD   " + completionPct() + "%  " + (st.att || 0) + " att";
+      text(line, W / 2, H * 0.535, 13, "rgba(255,255,255,0.85)", "center", "700");
+      const reason = state.result === "int" ? "Intercepted" : state.result === "turnover" ? "Turnover on downs" : state.result === "clock" ? "Time expired" : "Drive over";
+      text(reason, W / 2, H * 0.325, 13, "rgba(255,180,140,0.9)", "center", "700");
+    }
     const bw = Math.min(240, W * 0.7);
     btn("retry", W / 2 - bw / 2, H * 0.58, bw, 50, "RETRY", { size: 18, bg: "#1d6ad4", bd: "#fff", r: 12 });
     btn("change", W / 2 - bw / 2, H * 0.58 + 62, bw, 50, "CHANGE TEAM", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#f0c14b", r: 12 });
@@ -3362,10 +3867,11 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       text(assets.status || "Loading 3D assets…", W / 2, y + 56, 13, "#fff", "center", "700");
     } else {
       const bob = Math.sin(t * 2.4) * 2;
-      btn("mode-quota", x, y + bob, bw, hbtn, "ARCADE  ·  QUOTA", { size: 18, bg: "#1d6ad4", bd: "#fff", r: 14 });
-      btn("mode-downs", x, y + 70, bw, hbtn, "DOWNS  ·  DRIVE", { size: 18, bg: "#0e6d4a", bd: "#f0c14b", r: 14 });
-      btn("settings", x, y + 140, bw, 48, "SETTINGS", { size: 16, bg: "rgba(10,16,20,0.85)", bd: "#fff", r: 14 });
-      btn("credits", x, y + 200, bw, 44, "CREDITS", { size: 15, bg: "rgba(10,16,20,0.85)", bd: "#fff", r: 14 });
+      btn("mode-quota", x, y + bob, bw, 50, "ARCADE  ·  QUOTA", { size: 17, bg: "#1d6ad4", bd: "#fff", r: 14 });
+      btn("mode-downs", x, y + 60, bw, 50, "DOWNS  ·  DRIVE", { size: 17, bg: "#0e6d4a", bd: "#f0c14b", r: 14 });
+      btn("mode-drill", x, y + 120, bw, 50, "DEFENSE  ·  DRILL", { size: 17, bg: "#8b1e1e", bd: "#fff", r: 14 });
+      btn("settings", x, y + 180, bw, 44, "SETTINGS", { size: 15, bg: "rgba(10,16,20,0.85)", bd: "#fff", r: 14 });
+      btn("credits", x, y + 232, bw, 44, "CREDITS", { size: 15, bg: "rgba(10,16,20,0.85)", bd: "#fff", r: 14 });
     }
   }
 
@@ -3458,6 +3964,33 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       text(pl.sub, cx + cellW / 2, cy + cellH * 0.68, 12, "#f0c14b", "center", "700");
     });
     text("Tap a route package to snap", W / 2, gy + cellH * 2 + 36, 12, "rgba(255,255,255,0.7)", "center", "700");
+    if (state.gameMode === "downs" && state.down >= 4) {
+      const pw = Math.min(240, W * 0.7);
+      btn("punt", W / 2 - pw / 2, gy + cellH * 2 + 56, pw, 44, "PUNT", { size: 16, bg: "#8b1e1e", bd: "#fff", r: 12 });
+    }
+  }
+
+  function drawDefCall() {
+    ctx.fillStyle = "rgba(6,10,18,0.42)";
+    ctx.fillRect(0, 0, W, H);
+    text("DEFENSIVE CALL", W / 2, Math.max(86, H * 0.13), 22, "#ffe027", "center", "900", true, 5);
+    text(state.gameMode === "drill" ? "Pick a look, then stop the runner" : "You're on defense — pick a coverage", W / 2, Math.max(110, H * 0.13 + 26), 12, "rgba(255,255,255,0.75)", "center", "700");
+    const pad = 14;
+    const gridW = Math.min(W - pad * 2, 360);
+    const cellW = (gridW - 10) / 2;
+    const cellH = Math.min(110, H * 0.16);
+    const gx = (W - gridW) / 2;
+    const gy = H * 0.22;
+    DEF_CALLS.forEach((pl, i) => {
+      const cx = gx + (i % 2) * (cellW + 10);
+      const cy = gy + Math.floor(i / 2) * (cellH + 10);
+      btn("def:" + pl.id, cx, cy, cellW, cellH, "", { skipFill: true });
+      fillRound(cx, cy, cellW, cellH, 14, "rgba(10,16,24,0.88)");
+      ctx.strokeStyle = "#5ad7ff"; ctx.lineWidth = 2; strokeRound(cx, cy, cellW, cellH, 14);
+      text(pl.name, cx + cellW / 2, cy + cellH * 0.4, 17, "#fff", "center", "900", true);
+      text(pl.sub, cx + cellW / 2, cy + cellH * 0.68, 12, "#5ad7ff", "center", "700");
+    });
+    text("Tap a coverage to snap", W / 2, gy + cellH * 2 + 36, 12, "rgba(255,255,255,0.7)", "center", "700");
   }
 
   function render() {
@@ -3479,6 +4012,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     } else if (state.mode === "playcall") {
       drawScoreHUD();
       drawPlayCall();
+    } else if (state.mode === "defcall") {
+      drawScoreHUD();
+      drawDefCall();
     } else if (state.mode === "gameover") {
       drawScoreHUD();
       drawGameOver();
@@ -3488,13 +4024,18 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     } else {
       drawScoreHUD();
       drawJoystick();
-      drawRunButton();
-      drawStiffButton();
-      drawThrowBanner();
-      drawTutorial();
-      drawJukeSlider();
+      if (isUserOffense()) {
+        drawRunButton();
+        drawStiffButton();
+        drawThrowBanner();
+        drawTutorial();
+        drawJukeSlider();
+      } else {
+        drawDefenseButtons();
+      }
       drawBanners();
     }
+    if (state.leavePrompt) drawLeaveConfirm();
   }
 
   // =====================================================================
@@ -3504,6 +4045,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     ensureAudio();
     const idBtn = hitBtn(x, y);
     if (idBtn) { handleBtn(idBtn); return; }
+    if (state.leavePrompt) return;
     if (state.mode === "live") {
       const j = input.joy;
       const inJoy = j.baseX && dist(x, y, j.baseX, j.baseY) <= (j.baseR || 60) * 1.5;
@@ -3552,11 +4094,23 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     if (id === "back") {
       sfx("ui");
       if (state.mode === "teams" || state.mode === "settings" || state.mode === "credits") { goTitle(); return; }
-      goTeamSelect();
+      if (state.mode === "title") return;
+      // In-game: confirm leave so the back arrow can actually exit the mode.
+      if (state.mode === "live" || state.mode === "reset" || state.mode === "celebrate" || state.mode === "playcall" || state.mode === "defcall") {
+        if (state.mode === "live" || state.mode === "reset" || state.mode === "celebrate") {
+          state.pausedFrom = state.mode;
+          state.mode = "paused";
+        }
+        state.leavePrompt = true;
+        return;
+      }
+      if (state.mode === "paused") { state.leavePrompt = true; return; }
+      if (state.mode === "gameover") { goTitle(); return; }
+      goTitle();
       return;
     }
-    if (id === "mode-quota" || id === "mode-downs") {
-      state.gameMode = id === "mode-downs" ? "downs" : "quota";
+    if (id === "mode-quota" || id === "mode-downs" || id === "mode-drill") {
+      state.gameMode = id === "mode-downs" ? "downs" : (id === "mode-drill" ? "drill" : "quota");
       sfx("click");
       haptic(10);
       goTeamSelect();
@@ -3564,6 +4118,20 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     }
     if (id && id.indexOf("play:") === 0) {
       pickPlay(id.slice(5));
+      return;
+    }
+    if (id && id.indexOf("def:") === 0) {
+      callDefense(id.slice(4));
+      return;
+    }
+    if (id === "punt") {
+      sfx("whistle");
+      addBanner("Punt", "", "#5ad7ff", 1.3);
+      state.pendingSpotY = state.los;
+      state.pendingSpotX = state.ballX;
+      state.mode = "reset";
+      state.result = "punt";
+      state.resultT = 0.9; // short beat, then changePossession
       return;
     }
     if (id === "settings") {
@@ -3623,16 +4191,41 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return;
     }
     if (id === "pause") {
-      if (state.mode === "live" || state.mode === "reset" || state.mode === "celebrate") {
+      if (state.mode === "live" || state.mode === "reset" || state.mode === "celebrate" || state.mode === "playcall" || state.mode === "defcall") {
         state.pausedFrom = state.mode;
         state.mode = "paused";
+        state.leavePrompt = false;
         sfx("ui");
       }
       return;
     }
-    if (id === "resume") { state.mode = state.pausedFrom || "live"; sfx("ui"); return; }
+    if (id === "resume") {
+      state.leavePrompt = false;
+      state.mode = state.pausedFrom || "live";
+      sfx("ui");
+      return;
+    }
+    if (id === "restart") {
+      state.leavePrompt = false;
+      sfx("ui");
+      if (state.team) startRun();
+      return;
+    }
+    if (id === "quit" || id === "leave-yes") {
+      sfx("ui");
+      goTitle();
+      return;
+    }
+    if (id === "leave-no") {
+      sfx("ui");
+      state.leavePrompt = false;
+      return;
+    }
     if (id === "change") { sfx("ui"); goTeamSelect(); return; }
     if (id === "retry") { sfx("ui"); if (state.team) startRun(); return; }
+    if (id === "dive") { diveTackle(); return; }
+    if (id === "swat") { swatPass(); return; }
+    if (id === "switch") { switchDefender(); return; }
     if (id === "run") {
       if (state.mode === "live" && state.phase === "pass") {
         state.scrambling = true;
@@ -3657,9 +4250,52 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     }
   }
 
-  function goTitle() {
-    state.mode = "title";
+  function resetInput() {
+    const j = input.joy;
+    j.active = false; j.id = null; j.nx = 0; j.ny = 0; j.ox = 0; j.oy = 0;
+    input.mouse.down = false;
+    input.flick = 0;
+    input.keys = Object.create(null);
     state.aiming = false;
+    state.scrambling = false;
+    state.juke = null;
+    state.userDive = 0;
+    state.userSwat = 0;
+    state.leavePrompt = false;
+    state.hitStop = 0;
+    state.slowMo = 0;
+    state.timeScale = 1;
+    state.shake = 0;
+  }
+
+  function goTitle() {
+    resetInput();
+    state.mode = "title";
+    state.phase = "pre";
+    state.result = null;
+    state.resultT = 0;
+    state.playTime = 0;
+    state.clock = 0;
+    state.score = 0;
+    state.displayScore = 0;
+    state.homeScore = 0;
+    state.awayScore = 0;
+    state.possession = "home";
+    state.offDir = 1;
+    state.banners = [];
+    state.floaters = [];
+    state.particles = [];
+    state.msg = "";
+    state.msgT = 0;
+    state.autoSnap = false;
+    state.team = TEAMS[5];
+    state.foe = TEAMS[0];
+    state.los = 40;
+    state.firstDownY = 50;
+    state.ballX = FIELD_W * 0.5;
+    buildPlay();
+    state.mode = "title";
+    state.team = null;
     setViewBlur(true);
   }
 
@@ -3699,20 +4335,33 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return;
     }
     if (e.key === "r" || e.key === "R") {
-      if (state.mode === "live" && state.phase === "pass") {
+      if (state.mode === "live" && state.phase === "pass" && isUserOffense()) {
         handleBtn(state.scrambling ? "passmode" : "run");
       }
       return;
     }
+    if (e.key === "Tab") {
+      e.preventDefault();
+      if (state.mode === "live" && !isUserOffense()) switchDefender();
+      return;
+    }
+    if (e.key === "t" || e.key === "T") {
+      if (state.mode === "live" && !isUserOffense()) diveTackle();
+      return;
+    }
+    if (e.key === "f" || e.key === "F" || e.key === "j" || e.key === "J") {
+      if (state.mode === "live" && !isUserOffense()) swatPass();
+      return;
+    }
     if (e.key === "Enter" || e.key === " ") {
       if (state.mode === "gameover") handleBtn("retry");
-      else if (state.mode === "paused") handleBtn("resume");
-      else if (state.mode === "live" && state.phase === "pass" && !state.scrambling) { state.aiming = true; }
+      else if (state.mode === "paused" && !state.leavePrompt) handleBtn("resume");
+      else if (state.mode === "live" && isUserOffense() && state.phase === "pass" && !state.scrambling) { state.aiming = true; }
     }
   });
   window.addEventListener("keyup", (e) => {
     input.keys[e.key] = false;
-    if ((e.key === "Enter" || e.key === " ") && state.mode === "live" && state.phase === "pass" && state.aiming && !state.scrambling) {
+    if ((e.key === "Enter" || e.key === " ") && state.mode === "live" && isUserOffense() && state.phase === "pass" && state.aiming && !state.scrambling) {
       throwBall();
     }
   });
@@ -3773,6 +4422,16 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     TEAMS,
     layout,
     assets,
+    handleBtn,
+    callDefense,
+    switchDefender,
+    diveTackle,
+    swatPass,
+    beginDefense,
+    changePossession,
+    interceptBall,
+    isUserOffense,
+    resetInput,
   };
 
   W = window.innerWidth || 800;
@@ -3794,6 +4453,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 })();
 
   
+
 
 
 
