@@ -19,6 +19,8 @@ Pause has Resume, Restart, Settings, and Quit to Menu. The back arrow asks “Le
 
 **Computer:** WASD or arrows to aim or steer, Space to throw, R to scramble. On defense, T dives, F/J swats, Tab switches.
 
+The default camera is a higher Madden-style view that shows more of the field. Settings can switch it to Close or Far.
+
 Add the game to your home screen for a standalone app icon.
 
 ## Run it locally

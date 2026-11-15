@@ -48,6 +48,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
 
 
+
 (() => {
   "use strict";
 
@@ -161,12 +162,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     state.best = parseInt(localStorage.getItem("gridironDriveBest") || "0", 10) || 0;
   } catch (e) { state.best = 0; }
   function defaultSettings() {
-    return { sound: true, vibrate: true, difficulty: "normal", camera: "standard", night: false };
+    return { sound: true, vibrate: true, difficulty: "normal", camera: "madden", night: false };
   }
   function loadSettings() {
     try {
-      const s = JSON.parse(localStorage.getItem("gridironDriveSettings") || "null");
-      return Object.assign(defaultSettings(), s || {});
+      const s = Object.assign(defaultSettings(), JSON.parse(localStorage.getItem("gridironDriveSettings") || "null") || {});
+      if (s.camera === "standard") s.camera = "madden";
+      return s;
     } catch (e) { return defaultSettings(); }
   }
   function saveSettings() {
@@ -176,6 +178,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   state.muted = !state.settings.sound;
   const DIFF_MUL = { easy: 0.86, normal: 1, hard: 1.16 };
   const TACKLE_R = 1.08;
+  const USER_TACKLE_R = 1.62;
+  const USER_DIVE_R = 2.2;
 
   function odir() { return state.offDir < 0 ? -1 : 1; }
   function isUserOffense() { return state.gameMode !== "drill" && state.possession !== "away"; }
@@ -1280,6 +1284,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       if (isUserOffense()) state.controlled = p;
       else if (p && p.team === "home") state.controlled = p;
     }
+    if (!isUserOffense() && p && p.team !== "home") autoSwitchToBall();
   }
 
   function tryCatch() {
@@ -1585,18 +1590,31 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     sfx("whistle");
     haptic(12);
     setMsg(state.gameMode === "drill" ? "Stop the runner!" : "Stop the offense!", 2.0);
+    autoSwitchToBall();
   }
 
-  function switchDefender() {
-    if (isUserOffense()) return false;
+  function closestDefender(skip) {
     const ball = state.ball;
     const bx = ball ? ball.x : FIELD_W / 2, by = ball ? ball.y : state.los;
     let best = null, bestD = 1e9;
     for (const d of defense()) {
-      if (d.down || d === state.controlled) continue;
+      if (d.down || d === skip) continue;
       const dd = dist(d.x, d.y, bx, by);
       if (dd < bestD) { bestD = dd; best = d; }
     }
+    return best;
+  }
+
+  function autoSwitchToBall() {
+    if (isUserOffense()) return false;
+    const best = closestDefender(null);
+    if (best && best !== state.controlled) state.controlled = best;
+    return !!best;
+  }
+
+  function switchDefender() {
+    if (isUserOffense()) return false;
+    const best = closestDefender(state.controlled);
     if (best) { state.controlled = best; sfx("ui"); return true; }
     return false;
   }
@@ -1612,8 +1630,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     const c = carrier() || (state.ball && state.ball.state === "air" ? { x: state.ball.x, y: state.ball.y } : null);
     if (c) {
       const ang = angTo(d.x, d.y, c.x, c.y);
-      d.vx = Math.cos(ang) * (d.speed * 1.7);
-      d.vy = Math.sin(ang) * (d.speed * 1.7);
+      d.vx = Math.cos(ang) * (d.speed * 1.95);
+      d.vy = Math.sin(ang) * (d.speed * 1.95);
     }
     sfx("whoosh");
     haptic(12);
@@ -1663,7 +1681,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       if (rb && state.ball) {
         giveBall(rb, { keepControl: true });
         state.phase = "run";
+        state.runTime = 0;
         state.aiPlan = { kind: "run" };
+        autoSwitchToBall();
       }
     }
     return { mode: state.mode, phase: state.phase, possession: state.possession };
@@ -1904,6 +1924,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
   function updateLive(dt) {
     state.playTime += dt;
+    if (state.phase === "run") state.runTime = (state.runTime || 0) + dt;
+    else if (state.phase === "pass") state.runTime = 0;
     const axis = getMoveAxis();
     // flick uses screen-left/right so a juke still matches the swipe on screen
     const nx = axis.sx;
@@ -1916,7 +1938,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       if (!u.diving || state.userDive > 0) {
         if (state.userDive <= 0 && state.userSwat <= 0) {
           const mag = Math.hypot(axis.x, axis.y);
-          if (mag > 0.08) steerPlayer(u, axis.x, axis.y, dt, 1.08);
+          if (mag > 0.08) steerPlayer(u, axis.x, axis.y, dt, 1.22);
           else steerPlayer(u, 0, 0, dt, 0.5);
           u.animState = Math.hypot(u.vx, u.vy) > 0.5 ? "run" : "idle";
         }
@@ -2037,7 +2059,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         else if (d.cover) moveToward(d, d.cover.x + 0.4, d.cover.y + odir() * 0.9, d.speed * 0.96);
         else if (d.zone) moveToward(d, d.zone.x, d.zone.y, d.speed * 0.75);
       } else if (openField) {
-        pursueCarrier(d, carr);
+        if (!isUserOffense()) containCarrier(d, carr);
+        else pursueCarrier(d, carr);
       } else if ((d.role === "DL" || d.rush) && state.phase === "pass") {
         /* rushers are handled in updateLineBattle */
       } else if (crashQB && state.playTime >= POCKET_SAFE * 0.65) {
@@ -2125,6 +2148,18 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     }
 
     updateTackles(dt);
+  }
+
+  function containCarrier(d, c) {
+    if (!d || !c) return;
+    const dir = odir();
+    const gap = dist(d.x, d.y, c.x, c.y);
+    const side = d.x <= c.x ? -2.4 : 2.4;
+    const tx = clamp(c.x + side, 2, FIELD_W - 2);
+    const ty = c.y + dir * 2.6;
+    const mul = gap < 2.8 ? 0.38 : 0.58;
+    moveToward(d, tx, ty, d.speed * mul);
+    d.animState = "run";
   }
 
   function pursueCarrier(d, c, spdMul) {
@@ -2219,16 +2254,46 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       return;
     }
 
+    const user = !isUserOffense() ? state.controlled : null;
     const near = [];
     for (const d of defense()) {
       if (d.down) continue;
-      if (d.diving && !(d === state.controlled && state.userDive > 0)) continue;
+      if (d.diving && !(d === user && state.userDive > 0)) continue;
       const dd = dist(d.x, d.y, c.x, c.y);
-      if (dd < 5) near.push({ d, dd });
+      if (dd < 6) near.push({ d, dd });
     }
     near.sort((a, b) => a.dd - b.dd);
-    const inWrap = near.filter((n) => n.dd <= TACKLE_R);
+    const userR = (user && state.userDive > 0) ? USER_DIVE_R : USER_TACKLE_R;
+    const inWrap = near.filter((n) => n.dd <= (n.d === user ? userR : TACKLE_R));
     const closing = near.filter((n) => n.dd <= 3.05);
+
+    // User defense: the controlled defender is first to finish the play.
+    if (user && !isUserOffense()) {
+      const userHit = near.find((n) => n.d === user && n.dd <= userR);
+      if (userHit) {
+        beginTackle(user, c, { gang: false, byUser: true });
+        return;
+      }
+      // Defense Drill — only the user can tackle
+      if (state.gameMode === "drill") return;
+      const runT = state.phase === "run" ? (state.runTime || 0) : state.playTime;
+      const userRange = user && !user.down && dist(user.x, user.y, c.x, c.y) < 10.5;
+      const beaten = user.down || yardsGained(c.y) > yardsGained(user.y) + 2.0;
+      const aiWrap = inWrap.filter((n) => n.d !== user && n.dd <= 0.95);
+      const early = (state.phase === "run" && runT < 1.65) || (state.phase === "pass" && state.playTime < POCKET_SAFE + 1.35);
+      if (early && userRange && !beaten) return;
+      if (!beaten && userRange && runT < 2.4 && aiWrap.length < 2) return;
+      // Past the user or after a fair window: AI may wrap, but rarely on a single.
+      if (aiWrap.length >= 2 && (beaten || runT > 2.1 || state.playTime > POCKET_SAFE + 1.8)) {
+        beginTackle(aiWrap[0].d, c, { gang: true });
+        return;
+      }
+      if (aiWrap.length >= 1 && beaten && (runT > 1.5 || state.playTime > POCKET_SAFE + 1.5)) {
+        beginTackle(aiWrap[0].d, c, { gang: false });
+        return;
+      }
+      return;
+    }
 
     // Juke slider update
     if (state.juke && !state.juke.resolved) {
@@ -3295,6 +3360,57 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     }
   }
 
+  function cameraStyle() {
+    const portrait = H > W * 1.05;
+    let id = (state.settings && state.settings.camera) || "madden";
+    if (id === "standard") id = "madden";
+    // Close is the old tight third-person; Madden is the default elevated broadcast view; Far is even wider.
+    if (id === "close") {
+      let back = portrait ? 9.2 : 8.2;
+      let height = portrait ? 4.8 : 4.2;
+      let lookAhead = 11;
+      let fov = portrait ? 55 : 48;
+      if (state.phase === "flight") { back = 8.2; height = 5.8; lookAhead = 7; fov += 4; }
+      if (state.phase === "run") { back = portrait ? 8.4 : 7.6; height = 4.3; lookAhead = 10; }
+      return { id, back, height, lookAhead, fov, center: 0.08 };
+    }
+    if (id === "far") {
+      return {
+        id,
+        back: portrait ? 22.5 : 20.0,
+        height: portrait ? 14.2 : 12.6,
+        lookAhead: portrait ? 17 : 16,
+        fov: portrait ? 50 : 46,
+        center: 0.18
+      };
+    }
+    // madden — higher, farther, both lines and the secondary in view on a 390x844 phone
+    return {
+      id: "madden",
+      back: portrait ? 17.4 : 15.6,
+      height: portrait ? 11.2 : 9.8,
+      lookAhead: portrait ? 15 : 14,
+      fov: portrait ? 52 : 48,
+      center: 0.14
+    };
+  }
+
+  function getCameraMetrics() {
+    const cam = gfx.camera;
+    const look = gfx._look;
+    const style = cameraStyle();
+    let dist = 0;
+    if (cam && look) dist = cam.position.distanceTo(look);
+    return {
+      style: style.id,
+      back: (state.cam && state.cam.back) || style.back,
+      height: (state.cam && state.cam.height) || style.height,
+      camY: cam ? cam.position.y : 0,
+      dist,
+      lookAhead: style.lookAhead
+    };
+  }
+
   function updateCamera(dt) {
     if (!gfx.camera) return;
     const cam = gfx.camera;
@@ -3329,30 +3445,30 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       tx = state.ball.x; tz = state.ball.y; ty = Math.max(1.4, state.ball.z);
     } else if (carr) { tx = carr.x; tz = carr.y; ty = 1.5; }
 
-    const far = state.settings && state.settings.camera === "far";
-    let back = portrait ? 9.2 : 8.2;
-    let height = portrait ? 4.8 : 4.2;
-    let lookAhead = 11;
-    let fov = portrait ? 55 : 48;
-    if (state.phase === "flight") { back = 8.2; height = 5.8; lookAhead = 7; fov += 4; }
-    if (state.phase === "run") { back = portrait ? 8.4 : 7.6; height = 4.3; lookAhead = 10; }
-    if (state.mode === "celebrate") { back = 10; height = 5.2; lookAhead = 6; fov = 48; }
-    if (far) { back *= 1.28; height *= 1.22; fov -= 3; }
+    const style = cameraStyle();
+    let back = style.back, height = style.height, lookAhead = style.lookAhead, fov = style.fov;
+    if (state.mode === "celebrate") { back *= 0.92; height *= 0.9; lookAhead = Math.min(lookAhead, 10); }
     const spd = carr ? Math.hypot(carr.vx, carr.vy) : 0;
-    back += clamp(spd * 0.08, 0, 1.6);
-    fov += clamp(spd * 0.25, 0, 3);
-    cam.fov = lerp(cam.fov || fov, fov, clamp(dt * 3.2, 0, 1));
+    back += clamp(spd * 0.1, 0, 2.0);
+    fov += clamp(spd * 0.2, 0, 2.5);
+    // On defense, sit a little farther so both lines and the secondary stay in frame
+    if (!isUserOffense()) { back += 1.2; height += 0.6; lookAhead += 1.5; }
+    cam.fov = lerp(cam.fov || fov, fov, clamp(dt * 2.2, 0, 1));
     cam.updateProjectionMatrix();
-    const desired = new THREE.Vector3(lerp(tx, FIELD_W * 0.5, 0.08), height, tz - back);
+    const desired = new THREE.Vector3(lerp(tx, FIELD_W * 0.5, style.center), height, tz - back);
     if (state.shake > 0) {
-      desired.x += (Math.random() - 0.5) * state.shake * 0.5;
-      desired.y += (Math.random() - 0.5) * state.shake * 0.25;
+      desired.x += (Math.random() - 0.5) * state.shake * 0.4;
+      desired.y += (Math.random() - 0.5) * state.shake * 0.2;
     }
-    cam.position.lerp(desired, clamp(dt * 3.4, 0, 1));
+    // Smoother broadcast-style follow
+    cam.position.lerp(desired, clamp(dt * 2.05, 0, 1));
     const look = new THREE.Vector3(tx, ty, tz + lookAhead);
     if (!gfx._look) gfx._look = look.clone();
-    gfx._look.lerp(look, clamp(dt * 5, 0, 1));
+    gfx._look.lerp(look, clamp(dt * 2.6, 0, 1));
     cam.lookAt(gfx._look);
+    state.cam.back = back;
+    state.cam.height = height;
+    state.cam.style = style.id;
     if (gfx.sun) {
       gfx.sun.target.position.set(tx, 0, tz);
       gfx.sun.position.set(tx + 24, 48, tz - 16);
@@ -3939,7 +4055,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     row("set-sound", "SOUND  ·  " + (s.sound ? "ON" : "OFF"));
     row("set-vibrate", "HAPTICS  ·  " + (s.vibrate ? "ON" : "OFF"));
     row("set-diff", "DIFFICULTY  ·  " + String(s.difficulty || "normal").toUpperCase());
-    row("set-cam", "CAMERA  ·  " + String(s.camera || "standard").toUpperCase());
+    row("set-cam", "CAMERA  ·  " + String(s.camera || "madden").toUpperCase());
     row("set-night", "LIGHTING  ·  " + (s.night ? "NIGHT" : "DAY"));
     btn("set-back", x, y + 10, bw, 48, "BACK", { size: 16, bg: "#1d6ad4", bd: "#fff", r: 12 });
   }
@@ -4169,7 +4285,10 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       saveSettings(); sfx("click"); return;
     }
     if (id === "set-cam") {
-      state.settings.camera = state.settings.camera === "far" ? "standard" : "far";
+      const order = ["close", "madden", "far"];
+      const cur = state.settings.camera === "standard" ? "madden" : (state.settings.camera || "madden");
+      const i = Math.max(0, order.indexOf(cur));
+      state.settings.camera = order[(i + 1) % order.length];
       saveSettings(); sfx("click"); return;
     }
     if (id === "set-night") {
@@ -4432,6 +4551,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     interceptBall,
     isUserOffense,
     resetInput,
+    getCameraMetrics,
+    cameraStyle,
+    autoSwitchToBall,
   };
 
   W = window.innerWidth || 800;
@@ -4453,6 +4575,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 })();
 
   
+
 
 
 
